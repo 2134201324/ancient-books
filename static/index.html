@@ -20,7 +20,7 @@
 <main id="shelf">
   <div class="hero">
     <h1>公版典籍 · 全本直读</h1>
-    <p>中文古籍与西方典籍，全本入库、按章切分、点开即读。中文由繁转简，西文保留原文；西典可切换中文或中英对照，文言古籍可切换白话或文白对照，未预置译文的章节由 AI 实时生成。</p>
+    <p>中文古籍与西方典籍，全本入库、按章切分、点开即读。中文由繁转简，西文保留原文；西典可切换中文或中英对照，文言古籍可切换白话或文白对照，未预置译文的章节由 AI 实时生成。手边的纯文本也可以直接导入书库。</p>
   </div>
 
   <nav class="cats" id="cats"></nav>
@@ -30,10 +30,13 @@
     <div class="rlist" id="recentList"></div>
   </section>
   <div class="tools">
-    <div class="chips" id="sort">
-      <button data-sort="chars" class="on">按篇幅</button>
-      <button data-sort="title">按书名</button>
-      <button data-sort="author">按作者</button>
+    <div class="tleft">
+      <button class="impBtn" id="impBtn">＋ 导入书籍</button>
+      <div class="chips" id="sort">
+        <button data-sort="chars" class="on">按篇幅</button>
+        <button data-sort="title">按书名</button>
+        <button data-sort="author">按作者</button>
+      </div>
     </div>
     <div class="count" id="count"></div>
   </div>
@@ -45,6 +48,7 @@
   <div class="rtop">
     <button class="icon" id="back" title="返回书架">←</button>
     <div class="rtitle"><b id="btitle"></b><span id="bauthor"></span></div>
+    <button class="icon sm" id="delBtn" title="删除这本导入的书" hidden>删</button>
     <button class="icon" id="tocBtn" title="目录">☰</button>
   </div>
 
@@ -74,6 +78,37 @@
     </article>
   </div>
 </section>
+
+<div class="modal" id="impModal" hidden>
+  <div class="mask" data-close></div>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="impHead">
+    <div class="ph"><b id="impHead">导入书籍</b><button class="icon sm" data-close title="关闭">✕</button></div>
+    <div class="pbody">
+      <div class="frow">
+        <label class="fld"><span>书名</span><input id="impTitle" maxlength="120" placeholder="留空则用文件名"></label>
+        <label class="fld"><span>作者</span><input id="impAuthor" maxlength="120" placeholder="可留空"></label>
+      </div>
+      <label class="fld"><span>分类</span>
+        <select id="impCat">
+          <option>其他</option><option>小说</option><option>历史</option><option>哲学</option>
+          <option>诗文</option><option>社科</option><option>科学</option><option>戏曲</option>
+          <option>蒙学</option><option>文学</option>
+        </select>
+      </label>
+      <div class="drop" id="impDrop" tabindex="0">
+        <input type="file" id="impFile" accept=".txt,.md,.text,text/plain" hidden>
+        <p><b>把 .txt / .md 拖到这里</b>，或 <span class="lnk">选择文件</span></p>
+        <p class="hint">纯文本，UTF-8 / GBK 自动识别；单本上限 600 万字，按「第X章 / Chapter N」自动切章</p>
+      </div>
+      <textarea id="impText" placeholder="也可以直接粘贴正文…" spellcheck="false"></textarea>
+      <div class="impmsg" id="impMsg"></div>
+    </div>
+    <div class="pfoot">
+      <button class="ghost" data-close>取消</button>
+      <button class="primary" id="impGo">导入并阅读</button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

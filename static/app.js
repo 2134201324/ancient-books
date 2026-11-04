@@ -72,7 +72,7 @@ function render() {
       ${b.lang === 'en' ? '<span class="en">EN</span>' : ''}
       <div class="t">${esc(b.title)}</div>
       <div class="a">${esc(authorName(b.author))}</div>
-      <div class="s"><span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}</div>
+      <div class="s">${b.source === 'user' ? '<span class="imp">导入</span> · ' : ''}<span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}</div>
     </button>`).join('');
 
   $('#count').textContent = `${items.length} 本`;
@@ -91,91 +91,28 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-/* ---------- 阅读状态：以服务端为准，本地只留一个随机设备号 ---------- */
-const CID_KEY = 'md:cid';
-const cid = (() => {
-  let v = '';
-  try { v = localStorage.getItem(CID_KEY) || ''; } catch (e) { }
-  if (!/^[A-Za-z0-9_-]{6,64}$/.test(v)) {
-    v = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-    try { localStorage.setItem(CID_KEY, v); } catch (e) { }
-  }
-  return v;
-})();
-
-function lsGet(k, def) {
-  try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch (e) { return def; }
-}
-function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } }
-
-/* 进度表 { 书号: {i, t} }，时间戳用于多设备合并 */
-const getPos = (id) => {
-  const m = lsGet('md:pos', {}) || {};
-  const r = m[id];
-  return (r && typeof r === 'object') ? (+r.i || 0) : (+r || 0);
+/* ---------- 会话状态：只存在内存里，不写 localStorage / cookie ---------- */
+// 本版不采集任何用户信息：没有设备号、没有账号、没有埋点，
+// 阅读进度与最近在读只在当前页面会话内有效，刷新即归零。
+const mem = {
+  theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'night' : 'day',
+  fs: 0,
+  recent: [],
+  pos: {},
+  cn: {},
 };
-function setPos(id, i) {
-  const m = lsGet('md:pos', {}) || {};
-  m[id] = { i, t: Date.now() };
-  lsSet('md:pos', m);
-  syncState();
-}
 
-let saveTimer = null;
-function syncState() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    const body = {
-      recent: lsGet('md:recent', []) || [],
-      pos: lsGet('md:pos', {}) || {},
-      prefs: {
-        theme: localStorage.getItem('md:theme') || 'day',
-        fs: localStorage.getItem('md:fs') || '',
-        cn: lsGet('md:cn', {}) || {},
-      },
-    };
-    fetch('/api/state/' + cid, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).catch(() => { });
-  }, 600);
-}
+/* 清掉旧版本留在浏览器里的键（旧版本用 md: 前缀存过设备号与进度） */
+try {
+  Object.keys(localStorage).filter(k => k.indexOf('md:') === 0).forEach(k => localStorage.removeItem(k));
+} catch (e) { }
 
-/* 启动时把服务端状态并回本地，同一条取时间较新者 */
-async function syncStateLoad() {
-  try {
-    const r = await fetch('/api/state/' + cid);
-    if (!r.ok) return;
-    const s = await r.json();
-    const pos = lsGet('md:pos', {}) || {};
-    Object.entries(s.pos || {}).forEach(([id, v]) => {
-      const cur = pos[id];
-      const t = (v && typeof v === 'object') ? (+v.t || 0) : 0;
-      const ct = (cur && typeof cur === 'object') ? (+cur.t || 0) : 0;
-      if (!cur || ct < t) pos[id] = v;
-    });
-    lsSet('md:pos', pos);
+const getPos = (id) => mem.pos[id] || 0;
+const setPos = (id, i) => { mem.pos[id] = i; };
 
-    const byId = {};
-    (lsGet('md:recent', []) || []).concat(s.recent || []).forEach(x => {
-      if (!x || !x.id) return;
-      if (!byId[x.id] || (+x.t || 0) >= (+byId[x.id].t || 0)) byId[x.id] = x;
-    });
-    lsSet('md:recent', Object.values(byId).sort((a, b) => (+b.t || 0) - (+a.t || 0)).slice(0, 8));
-
-    if (s.prefs && s.prefs.cn) {
-      const cn = Object.assign({}, s.prefs.cn, lsGet('md:cn', {}) || {});
-      lsSet('md:cn', cn);
-    }
-    return s;
-  } catch (e) { return null; }
-}
-
-/* ---------- 继续阅读 ---------- */
+/* ---------- 最近在读（会话内） ---------- */
 function renderRecent() {
-  let list = lsGet('md:recent', []) || [];
-  list = list.filter(x => state.all.some(b => b.id === x.id)).slice(0, 6);
+  const list = mem.recent.filter(x => state.all.some(b => b.id === x.id)).slice(0, 6);
   if (!list.length) { $('#recent').hidden = true; return; }
   $('#recent').hidden = false;
   $('#recentList').innerHTML = list.map(x => {
@@ -190,11 +127,7 @@ function renderRecent() {
 }
 
 function pushRecent(id, ci) {
-  let list = lsGet('md:recent', []) || [];
-  list = list.filter(x => x.id !== id);
-  list.unshift({ id, ci, t: Date.now() });
-  lsSet('md:recent', list.slice(0, 8));
-  syncState();
+  mem.recent = [{ id, ci }].concat(mem.recent.filter(x => x.id !== id)).slice(0, 8);
 }
 
 /* ---------- 阅读器 ---------- */
@@ -206,6 +139,7 @@ async function openBook(id, resume = true) {
     state.toc = meta.toc;
     state.tr = !!meta.translate;
     $('#btitle').textContent = meta.title;
+    $('#delBtn').hidden = !id.startsWith('u');
     const isEn = meta.lang === 'en';
     let tag = '';
     if (isEn) {
@@ -219,7 +153,7 @@ async function openBook(id, resume = true) {
     const cnModes = $('#cnModes');
     const canCn = meta.has_cn || meta.translate;
     cnModes.hidden = !canCn;
-    state.cn = (!canCn) ? 'en' : ((lsGet('md:cn', {}) || {})[id] || 'en');
+    state.cn = (!canCn) ? 'en' : (mem.cn[id] || 'en');
     // 英文书：英文/中文/双语；文言书：原文/白话/对照
     const labels = isEn ? ['英文', '中文', '双语'] : ['原文', '白话', '对照'];
     [...cnModes.children].forEach((x, i) => {
@@ -493,11 +427,11 @@ function closeReader() {
 /* ---------- 配置 ---------- */
 function applyFont() {
   const def = window.innerWidth <= 560 ? 17 : 20;
-  const fs = localStorage.getItem('md:fs') || def;
+  const fs = mem.fs || def;
   document.documentElement.style.setProperty('--fs', fs + 'px');
 }
 function applyTheme() {
-  const t = localStorage.getItem('md:theme') || 'day';
+  const t = mem.theme;
   document.documentElement.dataset.theme = t;
   const b = $('#themeBtn');
   if (b) b.textContent = t === 'night' ? '日间' : '夜间';
@@ -540,18 +474,16 @@ $('#prevCh').addEventListener('click', () => state.ci > 0 && loadChapter(state.c
 $('#nextCh').addEventListener('click', () => state.ci < state.toc.length - 1 && loadChapter(state.ci + 1));
 $('#tocBtn').addEventListener('click', () => $('#toc').classList.toggle('open'));
 $('#fontMinus').addEventListener('click', () => {
-  let fs = +localStorage.getItem('md:fs') || (window.innerWidth <= 560 ? 17 : 20);
-  localStorage.setItem('md:fs', Math.max(14, fs - 1)); applyFont(); syncState();
+  const base = mem.fs || (window.innerWidth <= 560 ? 17 : 20);
+  mem.fs = Math.max(14, base - 1); applyFont();
 });
 $('#fontPlus').addEventListener('click', () => {
-  let fs = +localStorage.getItem('md:fs') || (window.innerWidth <= 560 ? 17 : 20);
-  localStorage.setItem('md:fs', Math.min(30, fs + 1)); applyFont(); syncState();
+  const base = mem.fs || (window.innerWidth <= 560 ? 17 : 20);
+  mem.fs = Math.min(30, base + 1); applyFont();
 });
 $('#themeBtn').addEventListener('click', () => {
-  const t = localStorage.getItem('md:theme') === 'night' ? 'day' : 'night';
-  localStorage.setItem('md:theme', t); applyTheme();
-  $('#themeBtn').textContent = t === 'night' ? '日间' : '夜间';
-  syncState();
+  mem.theme = mem.theme === 'night' ? 'day' : 'night';
+  applyTheme();
 });
 $('#cnModes').addEventListener('click', e => {
   const b = e.target.closest('button');
@@ -561,10 +493,7 @@ $('#cnModes').addEventListener('click', e => {
     if (state.tx.ctrl) { try { state.tx.ctrl.abort(); } catch (err) { } }
     state.tx = null;
   }
-  const cm = lsGet('md:cn', {}) || {};
-  cm[state.book.id] = state.cn;
-  lsSet('md:cn', cm);
-  syncState();
+  mem.cn[state.book.id] = state.cn;
   [...$('#cnModes').children].forEach(x => x.classList.toggle('on', x === b));
   renderToc();
   renderChapter();
@@ -574,7 +503,7 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault(); $('#q').focus(); return;
   }
-  if (!$('#reader').hidden) {
+  if (!$('#reader').hidden && $('#impModal').hidden) {
     if (e.key === 'ArrowLeft' && state.ci > 0) loadChapter(state.ci - 1);
     if (e.key === 'ArrowRight' && state.ci < state.toc.length - 1) loadChapter(state.ci + 1);
     if (e.key === 'Escape') closeReader();
@@ -582,17 +511,137 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------- 启动 ---------- */
-(async function init() {
-  applyFont(); applyTheme();
-  const [lib, st, sv] = await Promise.all([api('/api/library'), api('/api/stats'), syncStateLoad()]);
+async function loadShelf() {
+  const [lib, st] = await Promise.all([api('/api/library'), api('/api/stats')]);
   state.all = lib.items;
-  if (sv && sv.prefs) {
-    if (!localStorage.getItem('md:theme') && sv.prefs.theme) localStorage.setItem('md:theme', sv.prefs.theme);
-    if (!localStorage.getItem('md:fs') && sv.prefs.fs) localStorage.setItem('md:fs', sv.prefs.fs);
-    applyFont(); applyTheme();
-  }
   $('#meta').textContent = `${st.books} 本 · ${(st.chars / 10000).toFixed(0)} 万字 · ${st.western} 种西典`;
   renderCats(st);
   render();
   renderRecent();
+}
+
+(async function init() {
+  applyFont(); applyTheme();
+  await loadShelf();
 })();
+
+
+/* ---------- 导入书籍 ---------- */
+const imp = { text: '', busy: false };
+
+function impMsg(text, kind) {
+  const el = $('#impMsg');
+  el.textContent = text || '';
+  el.className = 'impmsg' + (kind ? ' ' + kind : '');
+}
+
+function openImp() {
+  $('#impModal').hidden = false;
+  setTimeout(() => $('#impTitle').focus(), 40);
+}
+
+function closeImp() {
+  if (imp.busy) return;
+  $('#impModal').hidden = true;
+  imp.text = '';
+  $('#impFile').value = '';
+  $('#impText').value = '';
+  $('#impTitle').value = '';
+  $('#impAuthor').value = '';
+  impMsg('');
+  const fn = $('#impDrop').querySelector('.fname');
+  if (fn) fn.remove();
+}
+
+async function takeFile(f) {
+  if (!f) return;
+  if (f.size > 20 * 1024 * 1024) { impMsg('文件超过 20 MB，请先拆分', 'err'); return; }
+  const buf = await f.arrayBuffer();
+  let t = new TextDecoder('utf-8').decode(buf);
+  if ((t.match(/\uFFFD/g) || []).length > 3) {
+    try { t = new TextDecoder('gb18030').decode(buf); } catch (e) { }
+  }
+  imp.text = t;
+  if (!$('#impTitle').value.trim()) {
+    $('#impTitle').value = f.name.replace(/\.[^.]+$/, '').slice(0, 120);
+  }
+  const old = $('#impDrop').querySelector('.fname');
+  if (old) old.remove();
+  const el = document.createElement('p');
+  el.className = 'fname';
+  el.textContent = f.name + ' · ' + t.length.toLocaleString() + ' 字';
+  $('#impDrop').appendChild(el);
+  impMsg('已读取，点「导入并阅读」入库', 'ok');
+}
+
+async function doImport() {
+  if (imp.busy) return;
+  const text = ($('#impText').value || '').trim() || imp.text.trim();
+  if (text.length < 200) { impMsg('正文太短，至少 200 字', 'err'); return; }
+  if (text.length > 6000000) { impMsg('正文超过 600 万字，请先拆分', 'err'); return; }
+  imp.busy = true;
+  $('#impGo').disabled = true;
+  impMsg('正在切章入库，大文件需要几秒…');
+  try {
+    const r = await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: $('#impTitle').value.trim(),
+        author: $('#impAuthor').value.trim(),
+        cat: $('#impCat').value,
+        text,
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || ('导入失败 ' + r.status));
+    impMsg('已入库：' + j.title + ' · ' + j.n + ' 节', 'ok');
+    imp.busy = false;
+    $('#impGo').disabled = false;
+    closeImp();
+    await loadShelf();
+    openBook(j.id, false);
+  } catch (e) {
+    imp.busy = false;
+    $('#impGo').disabled = false;
+    impMsg(String(e.message || e), 'err');
+  }
+}
+
+async function delBook() {
+  const b = state.book;
+  if (!b) return;
+  const token = prompt('删除《' + b.title + '》需要管理口令（服务端 ADMIN_TOKEN）：');
+  if (token == null) return;
+  const r = await fetch('/api/book/' + b.id, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Token': token },
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.detail || ('删除失败 ' + r.status)); return; }
+  closeReader();
+  await loadShelf();
+}
+
+$('#impBtn').addEventListener('click', openImp);
+$('#impModal').addEventListener('click', e => {
+  if (e.target.closest('[data-close]')) closeImp();
+});
+$('#impDrop').addEventListener('click', () => $('#impFile').click());
+$('#impDrop').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#impFile').click(); }
+});
+$('#impFile').addEventListener('change', e => takeFile(e.target.files[0]));
+['dragenter', 'dragover'].forEach(t => $('#impDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#impDrop').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(t => $('#impDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#impDrop').classList.remove('over');
+}));
+$('#impDrop').addEventListener('drop', e => {
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) takeFile(f);
+});
+$('#impGo').addEventListener('click', doImport);
+$('#delBtn').addEventListener('click', delBook);
+$('#impText').addEventListener('input', () => { if ($('#impText').value.trim()) impMsg(''); });

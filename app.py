@@ -1,5 +1,6 @@
 """墨读 · 公版书库（中文古籍 + 西方典籍）"""
 import gzip
+import hmac
 import json
 import os
 import re
@@ -7,10 +8,11 @@ import threading
 import time
 from functools import lru_cache
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import importer
 import trans
 from trans import translate_chapter
 
@@ -29,27 +31,41 @@ def _lib():
         return json.load(f)
 
 
+def _index(lib: list) -> list:
+    return [
+        {
+            "id": b["id"],
+            "title": b["title"],
+            "author": b["author"],
+            "chars": b["chars"],
+            "words": b.get("words", 0),
+            "n": b["n"],
+            "ok": b["ok"],
+            "kind": b["kind"],
+            "cat": b.get("cat", "其他"),
+            "lang": b.get("lang", "zh"),
+            "subject": b.get("subject", []),
+            "w": b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55),
+            "has_cn": bool(b.get("has_cn", False)),
+            "wen": b.get("wen", 0),
+            "source": b.get("source", ""),
+        }
+        for b in lib
+    ]
+
+
 LIB = _lib()
-INDEX = [
-    {
-        "id": b["id"],
-        "title": b["title"],
-        "author": b["author"],
-        "chars": b["chars"],
-        "words": b.get("words", 0),
-        "n": b["n"],
-        "ok": b["ok"],
-        "kind": b["kind"],
-        "cat": b.get("cat", "其他"),
-        "lang": b.get("lang", "zh"),
-        "subject": b.get("subject", []),
-        "w": b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55),
-        "has_cn": bool(b.get("has_cn", False)),
-        "wen": b.get("wen", 0),
-    }
-    for b in LIB
-]
+INDEX = _index(LIB)
 META = {b["id"]: b for b in LIB}
+
+
+def reload_library() -> None:
+    """导入/删除后重建内存索引，让书架立刻看到变化。"""
+    global LIB, INDEX, META
+    LIB = _lib()
+    INDEX = _index(LIB)
+    META = {b["id"]: b for b in LIB}
+    _load_book.cache_clear()
 
 
 def _can_modern(b: dict) -> bool:
@@ -294,94 +310,55 @@ def translate(bid: str, idx: int):
     )
 
 
-# ---------------------------------------------------------------- 阅读状态（服务端）
-# 书正文、译文、目录译名全部在服务端；这里再把「读到第几章 / 最近在读」也存到服务端，
-# 浏览器只保留一个随机设备号。换设备、清缓存都不会丢进度。
-USERS = os.path.join(DATA, "users")
-CID_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
-_state_lock = threading.Lock()
+# ---------------------------------------------------------------- 导入书籍
+# 用户上传的纯文本在服务端切章、入库，成为书库的一部分；服务端不记录任何上传者信息。
+MAX_TEXT = 6_000_000      # 单本正文上限（字符）
+MAX_IMPORTED = 2000       # 导入书总量上限，防止磁盘被刷爆
 
 
-def _state_path(cid: str) -> str:
-    return os.path.join(USERS, cid + ".json")
+@app.post("/api/import")
+def import_book(payload: dict = Body(...)):
+    title = str(payload.get("title") or "").strip()[:120]
+    author = str(payload.get("author") or "").strip()[:120]
+    cat = str(payload.get("cat") or "其他")
+    text = payload.get("text")
+    if not isinstance(text, str) or len(text.strip()) < 200:
+        raise HTTPException(400, "正文太短，至少 200 字")
+    if len(text) > MAX_TEXT:
+        raise HTTPException(413, f"正文过长，单本上限 {MAX_TEXT // 10000} 万字")
+    imported = sum(1 for x in INDEX if x.get("source") == "user")
+    if imported >= MAX_IMPORTED:
+        raise HTTPException(507, "导入数量已达上限，请先删除部分导入书籍")
 
-
-def _read_state(cid: str) -> dict:
-    p = _state_path(cid)
-    if not os.path.exists(p):
-        return {"recent": [], "pos": {}, "prefs": {}}
-    try:
-        with open(p, encoding="utf-8") as f:
-            d = json.load(f) or {}
-    except Exception:
-        return {"recent": [], "pos": {}, "prefs": {}}
+    book = importer.build(title, author, text, cat)
+    importer.save(book)
+    reload_library()
     return {
-        "recent": d.get("recent") or [],
-        "pos": d.get("pos") or {},
-        "prefs": d.get("prefs") or {},
+        "ok": True,
+        "id": book["id"],
+        "title": book["title"],
+        "author": book["author"],
+        "lang": book["lang"],
+        "kind": book["kind"],
+        "n": book["n"],
+        "chars": book["chars"],
     }
 
 
-def _merge_state(old: dict, new: dict) -> dict:
-    """按时间戳取新：最近在读按书去重，进度按书写入，偏好浅合并。"""
-    recent = {}
-    for x in list(old.get("recent") or []) + list(new.get("recent") or []):
-        if not isinstance(x, dict):
-            continue
-        bid = str(x.get("id") or "")[:64]
-        if not bid:
-            continue
-        t = int(x.get("t") or 0)
-        cur = recent.get(bid)
-        if cur is None or t >= cur["t"]:
-            recent[bid] = {"id": bid, "ci": max(0, int(x.get("ci") or 0)), "t": t}
-
-    pos = {}
-    for src in (old.get("pos") or {}, new.get("pos") or {}):
-        if not isinstance(src, dict):
-            continue
-        for bid, v in src.items():
-            bid = str(bid)[:64]
-            if isinstance(v, dict):
-                i, t = int(v.get("i") or 0), int(v.get("t") or 0)
-            else:
-                i, t = int(v or 0), 0
-            cur = pos.get(bid)
-            if cur is None or t >= cur["t"]:
-                pos[bid] = {"i": max(0, i), "t": t}
-
-    prefs = dict(old.get("prefs") or {})
-    if isinstance(new.get("prefs"), dict):
-        prefs.update(new["prefs"])
-    return {
-        "recent": sorted(recent.values(), key=lambda x: -x["t"])[:24],
-        "pos": dict(sorted(pos.items(), key=lambda kv: -kv[1]["t"])[:500]),
-        "prefs": prefs,
-    }
-
-
-@app.get("/api/state/{cid}")
-def get_state(cid: str):
-    if not CID_RE.match(cid):
-        raise HTTPException(400, "设备号不合法")
-    return _read_state(cid)
-
-
-@app.put("/api/state/{cid}")
-def put_state(cid: str, payload: dict = Body(...)):
-    if not CID_RE.match(cid):
-        raise HTTPException(400, "设备号不合法")
-    if len(json.dumps(payload, ensure_ascii=False)) > 262144:
-        raise HTTPException(413, "状态过大")
-    with _state_lock:
-        merged = _merge_state(_read_state(cid), payload)
-        os.makedirs(USERS, exist_ok=True)
-        p = _state_path(cid)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False)
-        os.replace(tmp, p)
-    return {"ok": True, "recent": len(merged["recent"]), "pos": len(merged["pos"])}
+@app.delete("/api/book/{bid}")
+def delete_book(bid: str, x_admin_token: str = Header("")):
+    """只允许删除导入的书，且需要服务端配置的 ADMIN_TOKEN。"""
+    if not bid.startswith("u"):
+        raise HTTPException(400, "仅可删除用户导入的书")
+    token = os.environ.get("ADMIN_TOKEN", "")
+    if not token:
+        raise HTTPException(403, "未开启删除功能（启动时设置 ADMIN_TOKEN 环境变量）")
+    if not hmac.compare_digest(token, x_admin_token):
+        raise HTTPException(403, "口令不正确")
+    if not importer.delete(bid):
+        raise HTTPException(404, "书不存在")
+    reload_library()
+    return {"ok": True}
 
 
 @app.get("/api/stats")
@@ -396,6 +373,7 @@ def stats():
         "words": sum(x["words"] for x in INDEX if x["lang"] == "en"),
         "chinese": sum(1 for x in INDEX if x["lang"] == "zh"),
         "western": sum(1 for x in INDEX if x["lang"] == "en"),
+        "imported": sum(1 for x in INDEX if x.get("source") == "user"),
         "cats": [{"name": c, "n": cats[c]} for c in CATS if cats.get(c)],
     }
 
