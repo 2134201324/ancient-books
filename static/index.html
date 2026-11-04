@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>墨读 · 公版书库</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand" id="brand">墨读</div>
+  <div class="search">
+    <input id="q" type="search" placeholder="搜书名、作者" autocomplete="off" spellcheck="false">
+    <span class="sk">⌘K</span>
+  </div>
+  <div class="meta" id="meta"></div>
+</header>
+
+<main id="shelf">
+  <div class="hero">
+    <h1>公版典籍 · 全本直读</h1>
+    <p>中文古籍与西方典籍，全本入库、按章切分、点开即读。中文由繁转简，西文保留原文；西典可切换中文或中英对照，文言古籍可切换白话或文白对照，未预置译文的章节由 AI 实时生成。</p>
+  </div>
+
+  <nav class="cats" id="cats"></nav>
+
+  <section id="recent" hidden>
+    <div class="rlabel">继续阅读</div>
+    <div class="rlist" id="recentList"></div>
+  </section>
+  <div class="tools">
+    <div class="chips" id="sort">
+      <button data-sort="chars" class="on">按篇幅</button>
+      <button data-sort="title">按书名</button>
+      <button data-sort="author">按作者</button>
+    </div>
+    <div class="count" id="count"></div>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" hidden>没有匹配的书。</div>
+</main>
+
+<section id="reader" hidden>
+  <div class="rtop">
+    <button class="icon" id="back" title="返回书架">←</button>
+    <div class="rtitle"><b id="btitle"></b><span id="bauthor"></span></div>
+    <button class="icon" id="tocBtn" title="目录">☰</button>
+  </div>
+
+  <div class="rbar">
+    <button class="icon sm" id="fontMinus" title="缩小字号">A-</button>
+    <button class="icon sm" id="fontPlus" title="放大字号">A+</button>
+    <div class="cnmodes" id="cnModes" hidden>
+      <button data-cn="en" class="on">英文</button>
+      <button data-cn="cn">中文</button>
+      <button data-cn="bi">双语</button>
+    </div>
+    <button class="icon sm wide" id="themeBtn" title="切换夜间模式">夜间</button>
+    <div class="prog"><i id="progFill"></i></div>
+    <span class="pnum" id="pnum"></span>
+  </div>
+
+  <div class="stage">
+    <aside class="toc" id="toc"><div class="tocHead">目录</div><div class="tocList" id="tocList"></div></aside>
+    <article class="paper">
+      <h2 id="ctitle"></h2>
+      <div class="txbar" id="txbar" hidden></div>
+      <div id="text" class="text"></div>
+      <nav class="pager">
+        <button id="prevCh">← 上一回</button>
+        <button id="nextCh">下一回 →</button>
+      </nav>
+    </article>
+  </div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
