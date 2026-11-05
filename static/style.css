@@ -378,3 +378,18 @@ button{font-family:inherit;cursor:pointer}
   .chips button{flex:1;padding:6px 0;text-align:center}
   .tools{gap:10px;margin:22px 0 14px}
 }
+
+/* ---------- 隐藏书柜 ---------- */
+.hbanner{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin:26px 0 6px;padding:10px 14px;border:1px solid var(--accent);border-radius:2px;
+  background:color-mix(in srgb,var(--accent) 7%,transparent);
+  color:var(--accent);font-size:12.5px;letter-spacing:.06em;
+}
+.hbanner button{
+  padding:4px 12px;border:1px solid currentColor;border-radius:2px;
+  background:transparent;color:inherit;font-size:12px;letter-spacing:.08em;
+}
+.hbanner button:hover{background:var(--accent);color:var(--paper)}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2);cursor:pointer}
+.chk input{accent-color:var(--accent);width:15px;height:15px;margin:0}

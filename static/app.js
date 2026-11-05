@@ -36,6 +36,7 @@ const state = {
   all: [], sort: 'chars', q: '', cat: '',
   book: null, toc: [], ci: 0, loading: false, cn: 'en', ch: null,
   tr: false, tx: null, stopped: null,
+  hidden: false,
 };
 
 function fmtChars(n) {
@@ -439,6 +440,67 @@ function applyTheme() {
 
 /* ---------- 事件 ---------- */
 $('#q').addEventListener('input', e => { state.q = e.target.value; render(); });
+
+/* ---------- 隐藏书柜：暗号在搜索框里输入，界面不留入口 ---------- */
+let hideKey = '';
+let hideBusy = false;
+
+async function checkKey(v) {
+  try {
+    const r = await fetch('/api/hidden/check?key=' + encodeURIComponent(v));
+    if (!r.ok) return false;
+    return !!(await r.json()).ok;
+  } catch (e) { return false; }
+}
+
+async function enterHidden(key) {
+  if (hideBusy) return;
+  hideBusy = true;
+  hideKey = key;
+  state.hidden = true;
+  state.q = '';
+  state.cat = '';
+  $('#q').value = '';
+  try {
+    await loadShelf(true);
+  } catch (e) {
+    state.hidden = false;
+    hideKey = '';
+    hideBusy = false;
+    alert('无法进入隐藏书柜：' + e);
+    return;
+  }
+  $('#hbanner').hidden = false;
+  $('#hero').hidden = true;
+  $('#q').placeholder = '隐藏书柜内搜索';
+  document.body.classList.add('hid');
+  hideBusy = false;
+}
+
+async function exitHidden() {
+  state.hidden = false;
+  hideKey = '';
+  state.q = '';
+  state.cat = '';
+  $('#q').value = '';
+  $('#q').placeholder = '搜书名、作者';
+  $('#hbanner').hidden = true;
+  $('#hero').hidden = false;
+  document.body.classList.remove('hid');
+  await loadShelf(false);
+}
+
+$('#q').addEventListener('keydown', async e => {
+  if (e.key !== 'Enter') return;
+  const v = e.target.value.trim();
+  if (!v) { if (state.hidden) { e.preventDefault(); await exitHidden(); } return; }
+  if (await checkKey(v)) {
+    e.preventDefault();
+    if (state.hidden) await exitHidden(); else await enterHidden(v);
+  }
+});
+
+$('#hbExit').addEventListener('click', exitHidden);
 $('#cats').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
@@ -511,10 +573,19 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------- 启动 ---------- */
-async function loadShelf() {
-  const [lib, st] = await Promise.all([api('/api/library'), api('/api/stats')]);
+async function loadShelf(hidden) {
+  const h = hidden === undefined ? state.hidden : hidden;
+  const qs = h ? '?hidden=1' : '';
+  const opt = h ? { headers: { 'X-Hidden-Key': hideKey } } : {};
+  const get = (u) => fetch(u, opt).then(r => r.ok ? r.json() : Promise.reject(r.status));
+  const [lib, st] = await Promise.all([get('/api/library' + qs), get('/api/stats' + qs)]);
   state.all = lib.items;
-  $('#meta').textContent = `${st.books} 本 · ${(st.chars / 10000).toFixed(0)} 万字 · ${st.western} 种西典`;
+  if (h) {
+    $('#meta').textContent = `隐藏书柜 · ${st.books} 本`;
+    $('#hbInfo').textContent = `隐藏书柜 · ${st.books} 本 · 不会出现在公开书架 · 搜索框再输一次暗号可退出`;
+  } else {
+    $('#meta').textContent = `${st.books} 本 · ${(st.chars / 10000).toFixed(0)} 万字 · ${st.western} 种西典`;
+  }
   renderCats(st);
   render();
   renderRecent();
@@ -536,6 +607,9 @@ function impMsg(text, kind) {
 }
 
 function openImp() {
+  const row = $('#impHiddenRow');
+  row.hidden = !state.hidden;
+  $('#impHidden').checked = !!state.hidden;
   $('#impModal').hidden = false;
   setTimeout(() => $('#impTitle').focus(), 40);
 }
@@ -574,32 +648,61 @@ async function takeFile(f) {
   impMsg('已读取，点「导入并阅读」入库', 'ok');
 }
 
-async function doImport() {
+async function doImport(opts) {
   if (imp.busy) return;
+  opts = opts || {};
   const text = ($('#impText').value || '').trim() || imp.text.trim();
   if (text.length < 200) { impMsg('正文太短，至少 200 字', 'err'); return; }
   if (text.length > 6000000) { impMsg('正文超过 600 万字，请先拆分', 'err'); return; }
   imp.busy = true;
   $('#impGo').disabled = true;
-  impMsg('正在切章入库，大文件需要几秒…');
+  impMsg(opts.replace ? '正在用新内容更新旧书…' : '正在切章入库，大文件需要几秒…');
   try {
+    const payload = {
+      title: $('#impTitle').value.trim(),
+      author: $('#impAuthor').value.trim(),
+      cat: $('#impCat').value,
+      text,
+      hidden: !!$('#impHidden').checked,
+    };
+    if (opts.replace) payload.replace = opts.replace;
+    if (opts.allowDuplicate) payload.allow_duplicate = true;
+
     const r = await fetch('/api/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: $('#impTitle').value.trim(),
-        author: $('#impAuthor').value.trim(),
-        cat: $('#impCat').value,
-        text,
-      }),
+      body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.detail || ('导入失败 ' + r.status));
-    impMsg('已入库：' + j.title + ' · ' + j.n + ' 节', 'ok');
+
+    // 同名书：让用户自己决定「覆盖」还是「另存」
+    if (r.status === 409 && !opts.replace && !opts.allowDuplicate) {
+      const d = (j.detail && j.detail.conflict) ? j.detail.conflict : {};
+      const name = d.title || payload.title || '同名书籍';
+      const yes = confirm(
+        `已存在同名书籍《${name}》${d.n ? '（' + d.n + ' 节）' : ''}。\n\n` +
+        '确定：用新内容更新它，章节标题与段落数对得上的旧译文会保留；\n' +
+        '取消：另存为一本新书，旧书保持不动。'
+      );
+      imp.busy = false;
+      $('#impGo').disabled = false;
+      if (yes) { await doImport({ replace: d.id || '' }); }
+      else { await doImport({ allowDuplicate: true }); }
+      return;
+    }
+
+    if (!r.ok) {
+      const msg = typeof j.detail === 'string' ? j.detail : (j.detail && j.detail.msg) || ('导入失败 ' + r.status);
+      throw new Error(msg);
+    }
+
+    let note = (j.updated ? '已更新：' : '已入库：') + j.title + ' · ' + j.n + ' 节';
+    if (j.updated) note += ' · 保留译文 ' + (j.kept_chapters || 0) + ' 章';
+    impMsg(note, 'ok');
     imp.busy = false;
     $('#impGo').disabled = false;
     closeImp();
-    await loadShelf();
+    await loadShelf(state.hidden);
     openBook(j.id, false);
   } catch (e) {
     imp.busy = false;
@@ -620,7 +723,7 @@ async function delBook() {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { alert(j.detail || ('删除失败 ' + r.status)); return; }
   closeReader();
-  await loadShelf();
+  await loadShelf(state.hidden);
 }
 
 $('#impBtn').addEventListener('click', openImp);

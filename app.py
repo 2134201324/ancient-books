@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from functools import lru_cache
@@ -49,6 +50,7 @@ def _index(lib: list) -> list:
             "has_cn": bool(b.get("has_cn", False)),
             "wen": b.get("wen", 0),
             "source": b.get("source", ""),
+            "hidden": bool(b.get("hidden")),
         }
         for b in lib
     ]
@@ -180,11 +182,29 @@ def _manifest(ttl: float = 3.0) -> dict:
     return _mf_state["data"]
 
 
+HIDDEN_KEY = os.environ.get("HIDDEN_KEY", "zxcv")
+
+
+def _hidden_ok(key: str) -> bool:
+    return bool(HIDDEN_KEY) and hmac.compare_digest(HIDDEN_KEY, key or "")
+
+
+@app.get("/api/hidden/check")
+def hidden_check(key: str = ""):
+    """搜索框里的暗号校验：只回答是不是，不返回任何内容。"""
+    return {"ok": _hidden_ok(key)}
+
+
 @app.get("/api/library")
-def library(q: str = "", sort: str = "chars", cat: str = ""):
+def library(q: str = "", sort: str = "chars", cat: str = "", hidden: int = 0,
+            x_hidden_key: str = Header("")):
     # 实时译文按磁盘清单覆盖，避免实时翻译过的书在书架上没有「译」角标
     mf = _manifest()
-    items = [dict(x, has_cn=bool(x["has_cn"] or (m := mf.get(x["id"])) and m["n"])) for x in INDEX]
+    if hidden:
+        if not _hidden_ok(x_hidden_key):
+            raise HTTPException(403, "暗号不对")
+    items = [dict(x, has_cn=bool(x["has_cn"] or (m := mf.get(x["id"])) and m["n"]))
+             for x in INDEX if bool(x.get("hidden")) == bool(hidden)]
     if cat:
         items = [x for x in items if x["cat"] == cat]
     if q:
@@ -227,6 +247,7 @@ def book_meta(bid: str):
         "lang": lang,
         "ok": b["ok"],
         "has_cn": has_cn,
+        "hidden": bool(b.get("hidden")),
         # mode: en2zh = 英译中；zh2modern = 文言今译；空 = 无可切换译文
         "mode": "en2zh" if lang == "en" else ("zh2modern" if can_modern else ""),
         "can_modern": can_modern,
@@ -310,6 +331,23 @@ def translate(bid: str, idx: int):
     )
 
 
+def _drop_cn_titles(bid: str) -> None:
+    if not os.path.exists(TITLES_PATH):
+        return
+    try:
+        with open(TITLES_PATH, encoding="utf-8") as f:
+            data = json.load(f) or {}
+        if bid in data:
+            data.pop(bid, None)
+            tmp = TITLES_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, TITLES_PATH)
+            _titles_state["mtime"] = -1.0
+    except Exception as e:  # noqa: BLE001
+        print(f"[titles] 清理 {bid} 失败: {e}", flush=True)
+
+
 # ---------------------------------------------------------------- 导入书籍
 # 用户上传的纯文本在服务端切章、入库，成为书库的一部分；服务端不记录任何上传者信息。
 MAX_TEXT = 6_000_000      # 单本正文上限（字符）
@@ -322,15 +360,62 @@ def import_book(payload: dict = Body(...)):
     author = str(payload.get("author") or "").strip()[:120]
     cat = str(payload.get("cat") or "其他")
     text = payload.get("text")
+    hidden = payload.get("hidden")
+    replace_id = str(payload.get("replace") or "").strip()
+
     if not isinstance(text, str) or len(text.strip()) < 200:
         raise HTTPException(400, "正文太短，至少 200 字")
     if len(text) > MAX_TEXT:
         raise HTTPException(413, f"正文过长，单本上限 {MAX_TEXT // 10000} 万字")
+
+    # 覆盖更新：沿用旧书 id，保留可对齐的译文，改坏了有 .bak 可回滚
+    if replace_id:
+        path = os.path.join(BOOKS, replace_id + ".json.gz")
+        if not os.path.exists(path):
+            raise HTTPException(404, "要更新的书不存在")
+        book = importer.build(title, author, text, cat, hidden=bool(hidden))
+        if hidden is None:
+            book.pop("hidden", None)      # 未显式指定时沿用旧书的可见性
+        old_n = (META.get(replace_id) or {}).get("n", 0)
+        info = importer.replace(replace_id, book)
+        # 章数变了，旧的目录译名会错位，直接整条摘掉，后续打开时按需重译
+        if old_n and old_n != book["n"]:
+            _drop_cn_titles(replace_id)
+        # 缓存按章号存，更新后可能张冠李戴，清掉最稳妥（已并入书籍的译文不受影响）
+        shutil.rmtree(os.path.join(DATA, "cn_cache", replace_id), ignore_errors=True)
+        reload_library()
+        return {
+            "ok": True,
+            "updated": True,
+            "id": replace_id,
+            "title": book["title"],
+            "author": book["author"],
+            "lang": book["lang"],
+            "kind": book["kind"],
+            "n": book["n"],
+            "chars": book["chars"],
+            "kept_chapters": info["kept_chapters"],
+        }
+
     imported = sum(1 for x in INDEX if x.get("source") == "user")
     if imported >= MAX_IMPORTED:
         raise HTTPException(507, "导入数量已达上限，请先删除部分导入书籍")
 
-    book = importer.build(title, author, text, cat)
+    # 同名书不默默新建一本，交给用户决定「覆盖」还是「另存」
+    conflict = importer.find_conflict(title, author, bool(hidden))
+    if conflict and not payload.get("allow_duplicate"):
+        raise HTTPException(409, detail={
+            "msg": f"已存在同名书籍《{conflict['title']}》",
+            "conflict": {
+                "id": conflict["id"],
+                "title": conflict["title"],
+                "author": conflict.get("author", ""),
+                "n": conflict.get("n", 0),
+                "hidden": bool(conflict.get("hidden")),
+            },
+        })
+
+    book = importer.build(title, author, text, cat, hidden=bool(hidden))
     importer.save(book)
     reload_library()
     return {
@@ -342,6 +427,7 @@ def import_book(payload: dict = Body(...)):
         "kind": book["kind"],
         "n": book["n"],
         "chars": book["chars"],
+        "hidden": bool(book.get("hidden")),
     }
 
 
@@ -362,18 +448,21 @@ def delete_book(bid: str, x_admin_token: str = Header("")):
 
 
 @app.get("/api/stats")
-def stats():
+def stats(hidden: int = 0, x_hidden_key: str = Header("")):
+    if hidden and not _hidden_ok(x_hidden_key):
+        raise HTTPException(403, "暗号不对")
+    pool = [x for x in INDEX if bool(x.get("hidden")) == bool(hidden)]
     cats = {}
-    for x in INDEX:
+    for x in pool:
         cats[x["cat"]] = cats.get(x["cat"], 0) + 1
     return {
-        "books": len(INDEX),
-        "complete": sum(1 for x in INDEX if x["ok"]),
-        "chars": sum(x["chars"] for x in INDEX if x["lang"] == "zh"),
-        "words": sum(x["words"] for x in INDEX if x["lang"] == "en"),
-        "chinese": sum(1 for x in INDEX if x["lang"] == "zh"),
-        "western": sum(1 for x in INDEX if x["lang"] == "en"),
-        "imported": sum(1 for x in INDEX if x.get("source") == "user"),
+        "books": len(pool),
+        "complete": sum(1 for x in pool if x["ok"]),
+        "chars": sum(x["chars"] for x in pool if x["lang"] == "zh"),
+        "words": sum(x["words"] for x in pool if x["lang"] == "en"),
+        "chinese": sum(1 for x in pool if x["lang"] == "zh"),
+        "western": sum(1 for x in pool if x["lang"] == "en"),
+        "imported": sum(1 for x in pool if x.get("source") == "user"),
         "cats": [{"name": c, "n": cats[c]} for c in CATS if cats.get(c)],
     }
 

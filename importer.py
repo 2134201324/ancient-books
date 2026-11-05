@@ -170,7 +170,7 @@ def new_id() -> str:
     return "u" + ts + "".join(random.choice(alphabet) for _ in range(4))
 
 
-def build(title: str, author: str, text: str, cat: str = "其他") -> dict:
+def build(title: str, author: str, text: str, cat: str = "其他", hidden: bool = False) -> dict:
     text = norm_text(text)
     chapters, kind = split_chapters(text)
     lang = detect_lang(text)
@@ -191,6 +191,7 @@ def build(title: str, author: str, text: str, cat: str = "其他") -> dict:
         "has_cn": False,
         "wen": wen_ratio(text) if lang == "zh" else 0,
         "source": "user",
+        "hidden": bool(hidden),
         "added": int(time.time()),
         "chapters": chapters,
     }
@@ -236,3 +237,130 @@ def delete(bid: str) -> bool:
                 json.dump(lib, f, ensure_ascii=False)
             os.replace(tmp, LIB_PATH)
         return True
+
+
+# ---------------------------------------------------------------- 同名更新
+def _key(s: str) -> str:
+    """书名/作者归一：去空白与常见标点，全角半角统一，忽略大小写。"""
+    s = re.sub(r"[\s\u3000]+", "", s or "")
+    s = re.sub(r"[·•:：、，,。.！!？?（）()\[\]【】《》〈〉\"'“”‘’\-—_/\\]", "", s)
+    return s.lower()
+
+
+def _lib() -> list:
+    if not os.path.exists(LIB_PATH):
+        return []
+    with open(LIB_PATH, encoding="utf-8") as f:
+        return json.load(f) or []
+
+
+def find_conflict(title: str, author: str = "", hidden: bool = False) -> dict | None:
+    """找同名书：书名归一后相同即可，作者只作加分项（导出的 txt 常缺作者）。
+
+    只在同一可见性范围内比对，避免公开导入时把隐藏书的名字抖出来。
+    """
+    t = _key(title)
+    if not t:
+        return None
+    a = _key(author)
+    cands = []
+    for b in _lib():
+        if bool(b.get("hidden")) != bool(hidden):
+            continue
+        if _key(b.get("title", "")) != t:
+            continue
+        ba = _key(b.get("author", ""))
+        same_author = bool(a and ba and a == ba)
+        cands.append((0 if same_author else 1, b))
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x[0])
+    return cands[0][1]
+
+
+def _backup(bid: str) -> str:
+    """覆盖前留一份原书，改坏了还能捞回来。"""
+    src = os.path.join(BOOKS, bid + ".json.gz")
+    if not os.path.exists(src):
+        return ""
+    bak_dir = os.path.join(BOOKS, ".bak")
+    os.makedirs(bak_dir, exist_ok=True)
+    dst = os.path.join(bak_dir, f"{bid}-{int(time.time())}.json.gz")
+    with open(src, "rb") as f, open(dst, "wb") as g:
+        g.write(f.read())
+    # 只留最近三份，避免反复更新把磁盘堆满
+    olds = sorted(
+        (os.path.join(bak_dir, n) for n in os.listdir(bak_dir) if n.startswith(bid + "-")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    for p in olds[3:]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return dst
+
+
+def replace(bid: str, new: dict) -> dict:
+    """用新内容覆盖旧书：保留 id 与可对齐的译文，其余按新文本重建。"""
+    old_path = os.path.join(BOOKS, bid + ".json.gz")
+    if not os.path.exists(old_path):
+        raise FileNotFoundError(bid)
+    with gzip.open(old_path, "rt", encoding="utf-8") as f:
+        old = json.load(f)
+
+    bak = _backup(bid)
+
+    # 章标题归一后对齐；只有段落数完全一致才敢沿用旧译文，否则宁可重译
+    oldmap = {}
+    for c in old.get("chapters") or []:
+        if c.get("cn"):
+            oldmap.setdefault(_key(c.get("title", "")), c)
+
+    kept = 0
+    for c in new["chapters"]:
+        o = oldmap.get(_key(c.get("title", "")))
+        if not o:
+            continue
+        if len(o["cn"]) != len(c["text"].split("\n")):
+            continue
+        c["cn"] = o["cn"]
+        c["cn_title"] = o.get("cn_title") or ""
+        kept += 1
+
+    new["id"] = bid
+    new["has_cn"] = kept > 0
+    new["hidden"] = bool(old.get("hidden"))   # 更新不改可见性
+    new["source"] = old.get("source") or new.get("source") or "user"
+    new["added"] = old.get("added") or new.get("added") or int(time.time())
+    new["created"] = old.get("created") or new["added"]
+    if new.get("author") in ("", "佚名") and old.get("author"):
+        new["author"] = old["author"]
+
+    with _lock:
+        tmp = old_path + ".tmp"
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(new, f, ensure_ascii=False)
+        os.replace(tmp, old_path)
+
+        lib = _lib()
+        out = []
+        entry = {k: v for k, v in new.items() if k != "chapters"}
+        for b in lib:
+            if b.get("id") == bid:
+                keep = {k: b[k] for k in ("id", "source", "hidden", "subject", "added") if k in b}
+                merged = dict(entry)
+                merged.update(keep)
+                merged["has_cn"] = entry["has_cn"]
+                merged["title"] = entry["title"]
+                merged["author"] = entry["author"]
+                merged["cat"] = entry["cat"]
+                out.append(merged)
+            else:
+                out.append(b)
+        tmp = LIB_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False)
+        os.replace(tmp, LIB_PATH)
+    return {"kept_chapters": kept, "backup": os.path.basename(bak) if bak else ""}

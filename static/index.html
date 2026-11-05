@@ -18,7 +18,12 @@
 </header>
 
 <main id="shelf">
-  <div class="hero">
+  <section class="hbanner" id="hbanner" hidden>
+    <span id="hbInfo">隐藏书柜</span>
+    <button id="hbExit" type="button">退出</button>
+  </section>
+
+  <div class="hero" id="hero">
     <h1>公版典籍 · 全本直读</h1>
     <p>中文古籍与西方典籍，全本入库、按章切分、点开即读。中文由繁转简，西文保留原文；西典可切换中文或中英对照，文言古籍可切换白话或文白对照，未预置译文的章节由 AI 实时生成。手边的纯文本也可以直接导入书库。</p>
   </div>
@@ -101,6 +106,9 @@
         <p class="hint">纯文本，UTF-8 / GBK 自动识别；单本上限 600 万字，按「第X章 / Chapter N」自动切章</p>
       </div>
       <textarea id="impText" placeholder="也可以直接粘贴正文…" spellcheck="false"></textarea>
+      <label class="chk" id="impHiddenRow" hidden>
+        <input type="checkbox" id="impHidden"> 放入隐藏书柜（不在公开书架显示）
+      </label>
       <div class="impmsg" id="impMsg"></div>
     </div>
     <div class="pfoot">
