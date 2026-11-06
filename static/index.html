@@ -77,8 +77,8 @@
       <div class="txbar" id="txbar" hidden></div>
       <div id="text" class="text"></div>
       <nav class="pager">
-        <button id="prevCh">← 上一回</button>
-        <button id="nextCh">下一回 →</button>
+        <button id="prevCh" title="上一回（A / ←）">← 上一回</button>
+        <button id="nextCh" title="下一回（D / →）">下一回 →</button>
       </nav>
     </article>
   </div>
@@ -104,6 +104,7 @@
         <input type="file" id="impFile" accept=".txt,.md,.text,text/plain" hidden>
         <p><b>把 .txt / .md 拖到这里</b>，或 <span class="lnk">选择文件</span></p>
         <p class="hint">纯文本，UTF-8 / GBK 自动识别；单本上限 600 万字，按「第X章 / Chapter N」自动切章</p>
+        <p class="fname" id="impFname" hidden></p>
       </div>
       <textarea id="impText" placeholder="也可以直接粘贴正文…" spellcheck="false"></textarea>
       <label class="chk" id="impHiddenRow" hidden>

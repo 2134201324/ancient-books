@@ -565,12 +565,64 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault(); $('#q').focus(); return;
   }
-  if (!$('#reader').hidden && $('#impModal').hidden) {
-    if (e.key === 'ArrowLeft' && state.ci > 0) loadChapter(state.ci - 1);
-    if (e.key === 'ArrowRight' && state.ci < state.toc.length - 1) loadChapter(state.ci + 1);
-    if (e.key === 'Escape') closeReader();
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  // 导入弹窗打开时，Esc 直接关掉（输入框里也生效）
+  if (!$('#impModal').hidden) {
+    if (e.key === 'Escape') { closeImp(); e.preventDefault(); }
+    return;
+  }
+
+  const el = e.target;
+  const typing = !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+    || el.tagName === 'SELECT' || el.isContentEditable));
+  if ($('#reader').hidden || !$('#impModal').hidden || typing) {
+    if (!$('#reader').hidden && $('#impModal').hidden && !typing && e.key === 'Escape') closeReader();
+    return;
+  }
+
+  /* 阅读器内：W/S 上下滚动，A/D 切换上一章 / 下一章（方向键等价） */
+  const paper = document.querySelector('.paper');
+  if (!paper) return;
+  const step = Math.max(220, Math.round(paper.clientHeight * 0.82));
+  const go = (d) => { paper.scrollBy({ top: d * step, behavior: 'smooth' }); e.preventDefault(); };
+  const ch = (d) => {
+    const n = state.ci + d;
+    if (n >= 0 && n < state.toc.length) { loadChapter(n); e.preventDefault(); }
+  };
+
+  switch (e.code) {
+    case 'KeyW': case 'ArrowUp': go(-1); break;
+    case 'KeyS': case 'ArrowDown': go(1); break;
+    case 'KeyA': case 'ArrowLeft': ch(-1); break;
+    case 'KeyD': case 'ArrowRight': ch(1); break;
+    case 'Escape': closeReader(); break;
+    default: break;
   }
 });
+
+/* ---------- 触屏：左右轻扫切换章节 ---------- */
+(() => {
+  const paper = document.querySelector('.paper');
+  if (!paper) return;
+  let sx = 0, sy = 0, st = 0;
+  paper.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    st = Date.now();
+  }, { passive: true });
+  paper.addEventListener('touchend', e => {
+    const t = e.changedTouches[0];
+    if (!t || Date.now() - st > 700) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;          // 正在选字，不翻章
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.8) return;
+    const n = state.ci + (dx < 0 ? 1 : -1);
+    if (n >= 0 && n < state.toc.length) loadChapter(n);
+  }, { passive: true });
+})();
 
 /* ---------- 启动 ---------- */
 async function loadShelf(hidden) {
@@ -598,7 +650,7 @@ async function loadShelf(hidden) {
 
 
 /* ---------- 导入书籍 ---------- */
-const imp = { text: '', busy: false };
+const imp = { text: '', busy: false, mode: '' };
 
 function impMsg(text, kind) {
   const el = $('#impMsg');
@@ -618,13 +670,46 @@ function closeImp() {
   if (imp.busy) return;
   $('#impModal').hidden = true;
   imp.text = '';
+  imp.mode = '';
   $('#impFile').value = '';
-  $('#impText').value = '';
   $('#impTitle').value = '';
   $('#impAuthor').value = '';
+  const ta = $('#impText');
+  ta.value = '';
+  ta.readOnly = false;
+  ta.classList.remove('ro');
+  $('#impFname').hidden = true;
+  $('#impFname').textContent = '';
   impMsg('');
-  const fn = $('#impDrop').querySelector('.fname');
-  if (fn) fn.remove();
+}
+
+/* 已选文件信息行：文件名 + 字数 + 清除 */
+function setFileInfo(name, chars) {
+  const el = $('#impFname');
+  el.textContent = '';
+  const sp = document.createElement('span');
+  sp.textContent = `${name} · ${chars.toLocaleString()} 字`;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '清除';
+  btn.addEventListener('click', e => { e.stopPropagation(); clearFile(); });
+  el.append(sp, btn);
+  el.hidden = false;
+}
+
+function clearFile() {
+  imp.text = '';
+  imp.mode = '';
+  $('#impFile').value = '';
+  $('#impFname').hidden = true;
+  $('#impFname').textContent = '';
+  const ta = $('#impText');
+  if (ta.readOnly) {
+    ta.readOnly = false;
+    ta.value = '';
+    ta.classList.remove('ro');
+  }
+  impMsg('已清除文件，可直接粘贴正文', '');
 }
 
 async function takeFile(f) {
@@ -636,22 +721,24 @@ async function takeFile(f) {
     try { t = new TextDecoder('gb18030').decode(buf); } catch (e) { }
   }
   imp.text = t;
+  imp.mode = 'file';
   if (!$('#impTitle').value.trim()) {
     $('#impTitle').value = f.name.replace(/\.[^.]+$/, '').slice(0, 120);
   }
-  const old = $('#impDrop').querySelector('.fname');
-  if (old) old.remove();
-  const el = document.createElement('p');
-  el.className = 'fname';
-  el.textContent = f.name + ' · ' + t.length.toLocaleString() + ' 字';
-  $('#impDrop').appendChild(el);
-  impMsg('已读取，点「导入并阅读」入库', 'ok');
+  // 只把开头一段放进文本框做预览，其余留在内存里，长文不会把弹窗撑开
+  const ta = $('#impText');
+  ta.value = t.slice(0, 600) + (t.length > 600 ? '\n…' : '');
+  ta.readOnly = true;
+  ta.classList.add('ro');
+  setFileInfo(f.name, t.length);
+  impMsg('已读取，点「导入并阅读」入库（文本框内为前 600 字预览）', 'ok');
 }
 
 async function doImport(opts) {
   if (imp.busy) return;
   opts = opts || {};
-  const text = ($('#impText').value || '').trim() || imp.text.trim();
+  // 选过文件就以文件为准，文本框里只是预览，避免被截断
+  const text = (imp.mode === 'file' && imp.text ? imp.text : ($('#impText').value || '')).trim();
   if (text.length < 200) { impMsg('正文太短，至少 200 字', 'err'); return; }
   if (text.length > 6000000) { impMsg('正文超过 600 万字，请先拆分', 'err'); return; }
   imp.busy = true;
