@@ -345,6 +345,11 @@ button{font-family:inherit;cursor:pointer}
 .drop p{margin:0;font-size:13px;color:var(--ink2)}
 .drop .hint{font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.6}
 .drop .lnk{color:var(--accent);text-decoration:underline}
+.drop kbd{
+  font:inherit;font-size:11px;padding:1px 5px;border-radius:2px;
+  border:1px solid var(--line);background:var(--paper2);color:var(--muted);
+  white-space:nowrap;
+}
 .drop .fname{
   display:flex;align-items:center;justify-content:center;gap:10px;
   color:var(--accent);font-size:12.5px;margin:6px 0 0;word-break:break-all;
@@ -356,6 +361,7 @@ button{font-family:inherit;cursor:pointer}
 .drop .fname button:hover{background:var(--accent);color:var(--paper)}
 #impText{
   /* 高度固定：粘贴再长的正文也只在框内滚动，不撑高弹窗 */
+  display:block;width:100%;
   flex:0 0 auto;height:150px;min-height:150px;max-height:150px;resize:none;
   overflow-y:auto;overscroll-behavior:contain;
   padding:10px 12px;border:1px solid var(--line);border-radius:2px;

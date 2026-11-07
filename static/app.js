@@ -927,7 +927,7 @@ function renderImages() {
   el.hidden = false;
 }
 
-function takeImages(files) {
+function takeImages(files, from) {
   imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
   const arr = [...(files || [])].filter(f =>
     /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
@@ -946,15 +946,17 @@ function takeImages(files) {
   if (merged.length > 400) { merged.length = 400; cut = true; }
   imp.images = merged;
 
-  // 选文件夹时用目录名当书名；只选一张时用文件名
+  // 选文件夹时用目录名当书名；只选一张时用文件名。
+  // 粘贴进来的图没有像样的名字，不拿它当书名。
   const first = arr[0].webkitRelativePath || '';
-  if (!$('#impTitle').value.trim()) {
+  if (from !== 'paste' && !$('#impTitle').value.trim()) {
     if (first.includes('/')) $('#impTitle').value = first.split('/')[0].slice(0, 120);
     else if (arr.length === 1) $('#impTitle').value = arr[0].name.replace(/\.[^.]+$/, '').slice(0, 120);
   }
 
   renderImages();
-  impMsg(cut ? '单本上限 400 页，超出部分已忽略' : `已选 ${merged.length} 页，点「上传并阅读」入库`, cut ? 'err' : 'ok');
+  const pre = from === 'paste' ? '已粘贴' : '已选';
+  impMsg(cut ? '单本上限 400 页，超出部分已忽略' : `${pre} ${merged.length} 页，点「上传并阅读」入库`, cut ? 'err' : 'ok');
 }
 
 /* 带上传进度的 POST；fetch 拿不到上传进度，所以这里用 XHR */
@@ -1116,6 +1118,74 @@ $('#impFile').addEventListener('change', e => takeFile(e.target.files[0]));
 $('#impDrop').addEventListener('drop', e => {
   const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
   if (f) takeFile(f);
+});
+
+/* ---------- 粘贴导入：截图 / 复制的图片 / .txt·.md 文件，Ctrl+V 直接进弹窗 ---------- */
+const CLIP_MIME = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+  gif: 'image/gif', bmp: 'image/bmp', avif: 'image/avif',
+};
+
+// 剪贴板里的图名多半是 image.png / blob，同名同尺寸会被 takeImages 的去重当成重复。
+// 统一改名为 zz-paste-0001 起，既唯一，又排在已选图片之后（后粘的放最后）。
+function clipImage(f, i, base) {
+  const m = (f.name || '').match(/\.([a-z0-9]+)$/i);
+  const ext = (m ? m[1] : (f.type.split('/')[1] || 'png')).toLowerCase()
+    .replace('jpeg', 'jpg').replace('svg+xml', 'svg');
+  const name = `zz-paste-${String(base + i + 1).padStart(4, '0')}.${ext}`;
+  try { return new File([f], name, { type: f.type || CLIP_MIME[ext] || 'image/png' }); }
+  catch (err) { return f; }   // 老浏览器不支持 File 构造，退回原名
+}
+
+document.addEventListener('paste', e => {
+  const modal = $('#impModal');
+  if (!modal || modal.hidden || imp.busy) return;
+  const dt = e.clipboardData;
+  if (!dt) return;
+
+  // 1) 剪贴板里带文件：截图、网页上复制的图片、资源管理器里复制的文件
+  const files = [];
+  if (dt.files && dt.files.length) files.push(...dt.files);
+  if (!files.length && dt.items) {
+    for (const it of dt.items) {
+      if (it.kind !== 'file') continue;
+      const f = it.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+
+  if (files.length) {
+    const imgs = files.filter(f =>
+      /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name || ''));
+    if (imgs.length) {
+      e.preventDefault();
+      setTab('image');                       // 切到图片页，粘贴的图立刻能看到缩略图
+      const base = imp.images.length;
+      takeImages(imgs.map((f, i) => clipImage(f, i, base)), 'paste');
+      return;
+    }
+    e.preventDefault();
+    const txt = files.find(f => /^text\//.test(f.type) || /\.(txt|md|text)$/i.test(f.name || ''));
+    if (txt) takeFile(txt);
+    else impMsg('只能粘贴图片或 .txt / .md 文本文件', 'err');
+    return;
+  }
+
+  // 2) 纯文本：贴在书名框里的长文明显放错了位置，改送进正文框
+  const t = dt.getData('text/plain') || '';
+  if (!t) return;
+  const el = document.activeElement;
+  if (el && el.id === 'impText') return;      // 正文框自己会处理，不抢
+  if (t.length <= 120 && !t.includes('\n')) return;   // 短词多半是在填书名/作者，放行
+  if (imp.tab !== 'text') return;            // 图片页不接管文本
+  e.preventDefault();
+  if (imp.mode === 'file') { impMsg('已选文件，先点「清除」再粘贴正文', 'err'); return; }
+  const ta = $('#impText');
+  const cur = ta.value.replace(/\s*$/, '');
+  const total = (cur ? cur.length + 2 : 0) + t.length;
+  if (total > 6000000) { impMsg('粘贴内容超过 600 万字，请存成文件后拖入', 'err'); return; }
+  ta.value = (cur ? cur + '\n\n' : '') + t;
+  impMsg(`已粘贴 ${t.length.toLocaleString()} 字，可继续粘贴，或点「导入并阅读」`, 'ok');
 });
 $('#impGo').addEventListener('click', () => (imp.tab === 'image' ? doImportImages() : doImport()));
 $('#delBtn').addEventListener('click', delBook);
