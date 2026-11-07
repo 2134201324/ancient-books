@@ -404,3 +404,44 @@ button{font-family:inherit;cursor:pointer}
 .hbanner button:hover{background:var(--accent);color:var(--paper)}
 .chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2);cursor:pointer}
 .chk input{accent-color:var(--accent);width:15px;height:15px;margin:0}
+
+/* ---------- 导入：文本 / 图片 切换 ---------- */
+.tabs{
+  display:flex;gap:4px;padding:3px;border-radius:3px;
+  background:color-mix(in srgb,var(--ink) 6%,transparent);
+}
+.tabs button{
+  flex:1;padding:7px 0;border:0;border-radius:2px;background:transparent;
+  color:var(--ink2);font-size:12.5px;letter-spacing:.06em;transition:.18s;
+}
+.tabs button:hover{color:var(--accent)}
+.tabs button.on{background:var(--paper2);color:var(--ink);box-shadow:0 1px 3px rgba(60,45,30,.12)}
+.imgprev{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+.imgprev img{
+  width:72px;height:94px;object-fit:cover;border:1px solid var(--line);
+  border-radius:2px;background:var(--paper);
+}
+.imgprev .more{
+  height:94px;display:flex;align-items:center;color:var(--muted);
+  font-size:12px;letter-spacing:.04em;
+}
+#imgInfo span{color:var(--accent)}
+
+/* ---------- 图片书（漫画）阅读 ---------- */
+.card .comic{
+  position:absolute;top:10px;right:10px;font-size:9.5px;letter-spacing:.1em;
+  color:var(--ink2);border:1px solid var(--line);padding:1px 4px;border-radius:2px;
+}
+.card:has(.comic) .t{padding-right:40px}
+.paper.imgmode{padding-top:clamp(10px,2vw,20px);padding-bottom:48px}
+.text.imgs{
+  max-width:min(1100px,100%);padding:0 clamp(8px,2vw,20px);text-indent:0;
+}
+.text.imgs img{
+  display:block;margin:0 auto;width:auto;height:auto;
+  max-width:100%;max-height:calc(100vh - 196px);   /* 整页尽量一屏放下 */
+  max-height:calc(100dvh - 196px);
+  background:var(--paper2);border-radius:2px;
+  box-shadow:0 10px 34px rgba(40,30,20,.14);
+}
+.text.imgs .loading{color:var(--muted);font-size:13px;padding:60px 0}

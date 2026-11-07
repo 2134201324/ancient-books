@@ -202,12 +202,18 @@ def resolve_model() -> str:
 
     chosen = ""
     if ids:
-        bad = re.compile(r"embed|whisper|tts|audio|image|dall|moderation|rerank|vision-only", re.I)
+        bad = re.compile(
+            r"embed|whisper|tts|audio|voice|image|dall|moderation|rerank|vision|minicpm-v|clef",
+            re.I,
+        )
         cand = [i for i in ids if not bad.search(i)]
+        # 优先 MiMo-V2.6-Flash；其次其他同档 flash 模型（快、便宜、中文稳）
         prefer = [
-            "gpt-4o-mini", "gpt-4.1-mini", "gpt-4o", "deepseek-chat",
-            "qwen-plus", "qwen-turbo", "glm-4-flash", "moonshot-v1-8k",
-            "claude-3-5-haiku", "gemini-2.0-flash", "gemini-1.5-flash",
+            "mimo-v2.6-flash", "mimo-v2", "mimo",
+            "qwen3.8-flash", "deepseek-v4.1-flash", "glm-5.3-flash",
+            "deepseek-v4-flash", "qwen-flash", "qwen-plus",
+            "gpt-4o-mini", "gpt-4.1-mini", "deepseek-chat",
+            "claude-3-5-haiku", "gemini-2.0-flash",
         ]
         for p in prefer:
             hit = [i for i in cand if p in i.lower()]
@@ -217,7 +223,7 @@ def resolve_model() -> str:
         if not chosen and cand:
             chosen = cand[0]
     with _lock:
-        _model_state["model"] = chosen or "gpt-4o-mini"
+        _model_state["model"] = chosen or "MiMo-V2.6-Flash"
         _model_state["at"] = now
     return _model_state["model"]
 

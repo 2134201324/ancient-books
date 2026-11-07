@@ -100,13 +100,31 @@
           <option>蒙学</option><option>文学</option>
         </select>
       </label>
-      <div class="drop" id="impDrop" tabindex="0">
-        <input type="file" id="impFile" accept=".txt,.md,.text,text/plain" hidden>
-        <p><b>把 .txt / .md 拖到这里</b>，或 <span class="lnk">选择文件</span></p>
-        <p class="hint">纯文本，UTF-8 / GBK 自动识别；单本上限 600 万字，按「第X章 / Chapter N」自动切章</p>
-        <p class="fname" id="impFname" hidden></p>
+      <div class="tabs" id="impTabs">
+        <button type="button" data-tab="text" class="on">文本</button>
+        <button type="button" data-tab="image">图片 · 漫画</button>
       </div>
-      <textarea id="impText" placeholder="也可以直接粘贴正文…" spellcheck="false"></textarea>
+
+      <div id="impTextPane">
+        <div class="drop" id="impDrop" tabindex="0">
+          <input type="file" id="impFile" accept=".txt,.md,.text,text/plain" hidden>
+          <p><b>把 .txt / .md 拖到这里</b>，或 <span class="lnk">选择文件</span></p>
+          <p class="hint">纯文本，UTF-8 / GBK 自动识别；单本上限 600 万字，按「第X章 / Chapter N」自动切章</p>
+          <p class="fname" id="impFname" hidden></p>
+        </div>
+        <textarea id="impText" placeholder="也可以直接粘贴正文…" spellcheck="false"></textarea>
+      </div>
+
+      <div id="impImgPane" hidden>
+        <div class="drop" id="imgDrop" tabindex="0">
+          <input type="file" id="imgFile" accept="image/*" multiple hidden>
+          <input type="file" id="imgDir" webkitdirectory directory multiple hidden>
+          <p><b>把漫画图片拖到这里</b>，或 <span class="lnk">选择图片</span> / <span class="lnk" id="imgPickDir">整个文件夹</span></p>
+          <p class="hint">一张图一页，按文件名自然排序；jpg / png / webp / gif，单张 16MB，单本 400 页</p>
+          <p class="fname" id="imgInfo" hidden></p>
+        </div>
+        <div class="imgprev" id="imgPrev"></div>
+      </div>
       <label class="chk" id="impHiddenRow" hidden>
         <input type="checkbox" id="impHidden"> 放入隐藏书柜（不在公开书架显示）
       </label>

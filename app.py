@@ -9,10 +9,11 @@ import threading
 import time
 from functools import lru_cache
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import comic
 import importer
 import trans
 from trans import translate_chapter
@@ -20,6 +21,7 @@ from trans import translate_chapter
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
 BOOKS = os.path.join(DATA, "books")
+MEDIA = os.path.join(DATA, "media")
 STATIC = os.path.join(BASE, "static")
 
 app = FastAPI(title="墨读 · 公版书库")
@@ -46,11 +48,13 @@ def _index(lib: list) -> list:
             "cat": b.get("cat", "其他"),
             "lang": b.get("lang", "zh"),
             "subject": b.get("subject", []),
-            "w": b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55),
             "has_cn": bool(b.get("has_cn", False)),
             "wen": b.get("wen", 0),
             "source": b.get("source", ""),
             "hidden": bool(b.get("hidden")),
+            "type": b.get("type", "text"),
+            "w": (b["n"] * 2500) if b.get("type") == "image" else
+                 (b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55)),
         }
         for b in lib
     ]
@@ -223,7 +227,8 @@ def library(q: str = "", sort: str = "chars", cat: str = "", hidden: int = 0,
 def book_meta(bid: str):
     b = _load_book(bid)
     chs = b["chapters"]
-    has_cn = _has_cn(b)
+    is_img = b.get("type") == "image"
+    has_cn = False if is_img else _has_cn(b)
     lang = b.get("lang", "zh")
     can_modern = _can_modern(b)
     cts = trans.titles(b["id"])
@@ -243,6 +248,7 @@ def book_meta(bid: str):
         "chars": b["chars"],
         "words": b.get("words", 0),
         "kind": b["kind"],
+        "type": b.get("type", "text"),
         "cat": b.get("cat", "其他"),
         "lang": lang,
         "ok": b["ok"],
@@ -251,7 +257,7 @@ def book_meta(bid: str):
         # mode: en2zh = 英译中；zh2modern = 文言今译；空 = 无可切换译文
         "mode": "en2zh" if lang == "en" else ("zh2modern" if can_modern else ""),
         "can_modern": can_modern,
-        "translate": bool(trans.enabled() and (lang == "en" or can_modern)),
+        "translate": bool(not is_img and trans.enabled() and (lang == "en" or can_modern)),
         "toc": toc,
     }
 
@@ -273,6 +279,9 @@ def chapter(bid: str, idx: int):
         "cnTitle": c.get("cn_title") or "",
         "next": nxt,
         "prev": prev,
+        "img": c.get("img") or "",
+        "w": c.get("w", 0),
+        "h": c.get("h", 0),
     }
 
 
@@ -304,6 +313,8 @@ def translate(bid: str, idx: int):
     b = _load_book(bid)
     if idx < 0 or idx >= len(b["chapters"]):
         raise HTTPException(404, "章节不存在")
+    if b.get("type") == "image":
+        raise HTTPException(400, "图片书没有可翻译的正文")
     if b.get("lang", "zh") != "en" and not _can_modern(b):
         raise HTTPException(400, "该书为白话文本，无需今译")
     if not trans.enabled():
@@ -378,6 +389,7 @@ def import_book(payload: dict = Body(...)):
             book.pop("hidden", None)      # 未显式指定时沿用旧书的可见性
         old_n = (META.get(replace_id) or {}).get("n", 0)
         info = importer.replace(replace_id, book)
+        comic.drop_media(replace_id)   # 若覆盖的是图片书，旧图一并清掉
         # 章数变了，旧的目录译名会错位，直接整条摘掉，后续打开时按需重译
         if old_n and old_n != book["n"]:
             _drop_cn_titles(replace_id)
@@ -431,6 +443,102 @@ def import_book(payload: dict = Body(...)):
     }
 
 
+# ---------------------------------------------------------------- 导入图片（漫画）
+# 一张图一页，前端按批提交（每批 ≤60 张），避免一次几百张把网关拖超时。
+MAX_BATCH = 60
+
+
+@app.post("/api/import/images")
+async def import_images(
+    files: list[UploadFile] = File(...),
+    title: str = Form(""),
+    author: str = Form(""),
+    cat: str = Form("其他"),
+    hidden: str = Form(""),
+    replace: str = Form(""),
+    append: str = Form(""),
+    allow_duplicate: str = Form(""),
+):
+    if not files:
+        raise HTTPException(400, "没有收到图片")
+    if len(files) > MAX_BATCH:
+        raise HTTPException(413, f"单次最多 {MAX_BATCH} 张，请分批上传")
+
+    items = []
+    total = 0
+    for f in files:
+        name = f.filename or "page.jpg"
+        if not comic.is_image(name):
+            continue
+        raw = await f.read()
+        total += len(raw)
+        if total > 120 * 1024 * 1024:
+            raise HTTPException(413, "这一批图片超过 120MB，请分批上传")
+        if raw:
+            items.append((name, raw))
+    if not items:
+        raise HTTPException(400, "没有可用的图片（支持 jpg / png / webp / gif / bmp / avif）")
+    items.sort(key=lambda x: comic.natural_key(x[0]))
+
+    # 追加：已有图片书的后续批次
+    if append:
+        b = comic.load(append)
+        if not b or b.get("type") != "image":
+            raise HTTPException(404, "要追加的书不存在")
+        if len(b["chapters"]) + len(items) > comic.MAX_PAGES:
+            raise HTTPException(413, f"单本上限 {comic.MAX_PAGES} 页")
+        info = comic.add_pages(b, items)
+        comic.update(append, b)
+        reload_library()
+        return {"ok": True, "id": append, "n": b["n"], "appended": True, **info}
+
+    if len(items) > comic.MAX_PAGES:
+        raise HTTPException(413, f"单本上限 {comic.MAX_PAGES} 页")
+
+    title = (title or "").strip()[:120]
+
+    # 覆盖更新：清旧图、沿用旧 id
+    if replace:
+        if not comic.load(replace):
+            raise HTTPException(404, "要更新的书不存在")
+        nb = comic.new_book(title, author, cat, bool(hidden))
+        info = comic.add_pages(nb, items)
+        if not info["added"]:
+            comic.drop_media(nb["id"])
+            raise HTTPException(400, detail={"msg": "这些图片都无法解析", "errors": info["errors"]})
+        comic.replace_with(replace, nb)
+        reload_library()
+        return {"ok": True, "updated": True, "id": replace, "title": nb["title"],
+                "author": nb["author"], "n": nb["n"], "hidden": bool(nb.get("hidden")), **info}
+
+    imported = sum(1 for x in INDEX if x.get("source") == "user")
+    if imported >= MAX_IMPORTED:
+        raise HTTPException(507, "导入数量已达上限，请先删除部分导入书籍")
+
+    conflict = importer.find_conflict(title, author, bool(hidden)) if title else None
+    if conflict and not allow_duplicate:
+        raise HTTPException(409, detail={
+            "msg": f"已存在同名书籍《{conflict['title']}》",
+            "conflict": {
+                "id": conflict["id"],
+                "title": conflict["title"],
+                "author": conflict.get("author", ""),
+                "n": conflict.get("n", 0),
+                "hidden": bool(conflict.get("hidden")),
+            },
+        })
+
+    book = comic.new_book(title, author, cat, bool(hidden))
+    info = comic.add_pages(book, items)
+    if not info["added"]:
+        comic.drop_media(book["id"])
+        raise HTTPException(400, detail={"msg": "这些图片都无法解析", "errors": info["errors"]})
+    comic.update(book["id"], book)
+    reload_library()
+    return {"ok": True, "id": book["id"], "title": book["title"], "author": book["author"],
+            "n": book["n"], "hidden": bool(book["hidden"]), **info}
+
+
 @app.delete("/api/book/{bid}")
 def delete_book(bid: str, x_admin_token: str = Header("")):
     """只允许删除导入的书，且需要服务端配置的 ADMIN_TOKEN。"""
@@ -443,6 +551,7 @@ def delete_book(bid: str, x_admin_token: str = Header("")):
         raise HTTPException(403, "口令不正确")
     if not importer.delete(bid):
         raise HTTPException(404, "书不存在")
+    comic.drop_media(bid)
     reload_library()
     return {"ok": True}
 
@@ -460,7 +569,8 @@ def stats(hidden: int = 0, x_hidden_key: str = Header("")):
         "complete": sum(1 for x in pool if x["ok"]),
         "chars": sum(x["chars"] for x in pool if x["lang"] == "zh"),
         "words": sum(x["words"] for x in pool if x["lang"] == "en"),
-        "chinese": sum(1 for x in pool if x["lang"] == "zh"),
+        "chinese": sum(1 for x in pool if x["lang"] == "zh" and x.get("type") != "image"),
+        "comic": sum(1 for x in pool if x.get("type") == "image"),
         "western": sum(1 for x in pool if x["lang"] == "en"),
         "imported": sum(1 for x in pool if x.get("source") == "user"),
         "cats": [{"name": c, "n": cats[c]} for c in CATS if cats.get(c)],
@@ -473,3 +583,5 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+os.makedirs(MEDIA, exist_ok=True)
+app.mount("/media", StaticFiles(directory=MEDIA), name="media")

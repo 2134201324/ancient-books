@@ -46,6 +46,7 @@ function fmtChars(n) {
 const UNIT = { '回': '回', '章': '章', '卷': '卷', '篇': '篇', '节': '节', '单': '节' };
 
 function bookSize(b) {
+  if (b.type === 'image') return b.n + ' 页';
   if (b.lang === 'en') {
     const w = b.words || Math.round(b.chars / 5.6);
     return w >= 10000 ? (w / 10000).toFixed(w >= 100000 ? 0 : 1) + ' 万词' : w + ' 词';
@@ -71,9 +72,10 @@ function render() {
       ${b.ok ? '' : '<span class="badge">残本</span>'}
       ${b.has_cn ? `<span class="cn">${b.lang === 'zh' ? '白' : '译'}</span>` : ''}
       ${b.lang === 'en' ? '<span class="en">EN</span>' : ''}
+      ${b.type === 'image' ? '<span class="comic">漫</span>' : ''}
       <div class="t">${esc(b.title)}</div>
       <div class="a">${esc(authorName(b.author))}</div>
-      <div class="s">${b.source === 'user' ? '<span class="imp">导入</span> · ' : ''}<span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}</div>
+      <div class="s">${b.source === 'user' ? '<span class="imp">导入</span> · ' : ''}<span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${b.type === 'image' ? `${b.n} 页` : `${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}`}</div>
     </button>`).join('');
 
   $('#count').textContent = `${items.length} 本`;
@@ -142,8 +144,15 @@ async function openBook(id, resume = true) {
     $('#btitle').textContent = meta.title;
     $('#delBtn').hidden = !id.startsWith('u');
     const isEn = meta.lang === 'en';
+    const isImg = meta.type === 'image';
+    $('#text').classList.toggle('imgs', isImg);
+    $('.paper').classList.toggle('imgmode', isImg);
+    $('#fontMinus').hidden = isImg;
+    $('#fontPlus').hidden = isImg;
     let tag = '';
-    if (isEn) {
+    if (isImg) {
+      tag = ` · 漫画 · ${meta.toc.length} 页`;
+    } else if (isEn) {
       tag = meta.has_cn ? ' · 英文原著（含中译）'
         : (meta.translate ? ' · 英文原著 · 可实时翻译' : ' · 英文原著');
     } else if (meta.can_modern) {
@@ -192,6 +201,7 @@ function markToc() {
 }
 
 async function loadChapter(idx, scrollTop = true) {
+  stopScroll();
   if (state.loading) return;
   if (state.tx && state.tx.ctrl) { try { state.tx.ctrl.abort(); } catch (e) { } }
   state.tx = null;
@@ -225,6 +235,18 @@ function renderChapter() {
   const c = state.ch;
   if (!c) return;
   const ta = $('#text');
+
+  if (state.book && state.book.type === 'image') {
+    $('#ctitle').textContent = c.title;
+    $('#txbar').hidden = true;
+    const src = '/media/' + state.book.id + '/' + encodeURIComponent(c.img || '');
+    const dim = c.w ? ` width="${c.w}" height="${c.h}"` : '';
+    ta.innerHTML = c.img
+      ? `<img class="pg" src="${src}"${dim} alt="${esc(c.title)}" decoding="async">`
+      : '<p class="loading">这一页缺图</p>';
+    preloadPage(state.ci + 1);
+    return;
+  }
   const mode = state.cn;
   ta.dataset.lang = (mode === 'en') ? state.book.lang : 'cn';
   const cn = c.cn || [];
@@ -253,6 +275,14 @@ function renderChapter() {
     if (cn[i] && cn[i].trim()) html += `<p class="tr">${esc(cn[i])}</p>`;
   }
   ta.innerHTML = html;
+}
+
+function preloadPage(i) {
+  if (!state.book || state.book.type !== 'image') return;
+  if (i < 0 || i >= state.toc.length) return;
+  const fn = String(i + 1).padStart(4, '0') + '.jpg';
+  const im = new Image();
+  im.src = '/media/' + state.book.id + '/' + fn;
 }
 
 /* ---------- 实时翻译 ---------- */
@@ -561,6 +591,45 @@ $('#cnModes').addEventListener('click', e => {
   renderChapter();
 });
 
+/* ---------- 匀速滚动：按住持续，轻点也走一小段 ---------- */
+const held = { up: false, down: false };
+const sc = { raf: 0, dir: 0, vel: 380, last: 0, until: 0 };
+
+function scrollStart(dir) {
+  const paper = document.querySelector('.paper');
+  if (!paper) return;
+  sc.dir = dir;
+  sc.until = performance.now() + 200;   // 轻点一下也滑 200ms
+  if (sc.raf) return;
+  paper.style.scrollBehavior = 'auto';  // 关掉 CSS 平滑，改为逐帧匀速
+  sc.last = performance.now();
+  sc.raf = requestAnimationFrame(scrollTick);
+}
+
+function scrollTick(t) {
+  const paper = document.querySelector('.paper');
+  if (!paper) { sc.raf = 0; sc.dir = 0; return; }
+  const dt = Math.min(0.06, Math.max(0, (t - sc.last) / 1000));
+  sc.last = t;
+  if (sc.dir) paper.scrollTop += sc.dir * sc.vel * dt;
+  const holding = sc.dir < 0 ? held.up : held.down;
+  if (holding || t < sc.until) {
+    sc.raf = requestAnimationFrame(scrollTick);
+  } else {
+    sc.raf = 0;
+    sc.dir = 0;
+    paper.style.scrollBehavior = '';
+  }
+}
+
+function stopScroll() {
+  held.up = held.down = false;
+  sc.dir = 0;
+  if (sc.raf) { cancelAnimationFrame(sc.raf); sc.raf = 0; }
+  const paper = document.querySelector('.paper');
+  if (paper) paper.style.scrollBehavior = '';
+}
+
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault(); $('#q').focus(); return;
@@ -581,25 +650,27 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  /* 阅读器内：W/S 上下滚动，A/D 切换上一章 / 下一章（方向键等价） */
-  const paper = document.querySelector('.paper');
-  if (!paper) return;
-  const step = Math.max(220, Math.round(paper.clientHeight * 0.82));
-  const go = (d) => { paper.scrollBy({ top: d * step, behavior: 'smooth' }); e.preventDefault(); };
+  /* 阅读器内：W/S 匀速上下滚动，A/D 切换上一章 / 下一章（方向键等价） */
   const ch = (d) => {
     const n = state.ci + d;
     if (n >= 0 && n < state.toc.length) { loadChapter(n); e.preventDefault(); }
   };
 
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp': go(-1); break;
-    case 'KeyS': case 'ArrowDown': go(1); break;
+    case 'KeyW': case 'ArrowUp': held.up = true; scrollStart(-1); e.preventDefault(); break;
+    case 'KeyS': case 'ArrowDown': held.down = true; scrollStart(1); e.preventDefault(); break;
     case 'KeyA': case 'ArrowLeft': ch(-1); break;
     case 'KeyD': case 'ArrowRight': ch(1); break;
     case 'Escape': closeReader(); break;
     default: break;
   }
 });
+
+document.addEventListener('keyup', e => {
+  if (e.code === 'KeyW' || e.code === 'ArrowUp') held.up = false;
+  if (e.code === 'KeyS' || e.code === 'ArrowDown') held.down = false;
+});
+window.addEventListener('blur', stopScroll);
 
 /* ---------- 触屏：左右轻扫切换章节 ---------- */
 (() => {
@@ -650,7 +721,7 @@ async function loadShelf(hidden) {
 
 
 /* ---------- 导入书籍 ---------- */
-const imp = { text: '', busy: false, mode: '' };
+const imp = { text: '', busy: false, mode: '', tab: 'text', images: [], urls: [], resumeId: '' };
 
 function impMsg(text, kind) {
   const el = $('#impMsg');
@@ -662,6 +733,7 @@ function openImp() {
   const row = $('#impHiddenRow');
   row.hidden = !state.hidden;
   $('#impHidden').checked = !!state.hidden;
+  setTab(imp.tab);
   $('#impModal').hidden = false;
   setTimeout(() => $('#impTitle').focus(), 40);
 }
@@ -671,6 +743,8 @@ function closeImp() {
   $('#impModal').hidden = true;
   imp.text = '';
   imp.mode = '';
+  imp.resumeId = '';
+  clearImages();
   $('#impFile').value = '';
   $('#impTitle').value = '';
   $('#impAuthor').value = '';
@@ -798,6 +872,217 @@ async function doImport(opts) {
   }
 }
 
+/* ---------- 导入：图片 / 漫画 ---------- */
+function setTab(t) {
+  imp.tab = t === 'image' ? 'image' : 'text';
+  [...$('#impTabs').children].forEach(x => x.classList.toggle('on', x.dataset.tab === imp.tab));
+  $('#impTextPane').hidden = imp.tab !== 'text';
+  $('#impImgPane').hidden = imp.tab !== 'image';
+  $('#impGo').textContent = imp.tab === 'image' ? '上传并阅读' : '导入并阅读';
+  $('#impTitle').placeholder = imp.tab === 'image' ? '留空则自动命名' : '留空则用文件名';
+  impMsg('');
+}
+
+/* 文件名自然排序：1、2、10 而不是 1、10、2 */
+function natKey(name) {
+  return String(name || '').split(/(\d+)/)
+    .map(x => (/^\d+$/.test(x) ? x.padStart(9, '0') : x.toLowerCase())).join('');
+}
+
+function clearImages() {
+  imp.images = [];
+  imp.urls.forEach(u => URL.revokeObjectURL(u));
+  imp.urls = [];
+  const pv = $('#imgPrev');
+  if (pv) pv.innerHTML = '';
+  const info = $('#imgInfo');
+  if (info) { info.hidden = true; info.textContent = ''; }
+}
+
+function renderImages() {
+  const list = imp.images;
+  const pv = $('#imgPrev');
+  pv.innerHTML = '';
+  imp.urls.forEach(u => URL.revokeObjectURL(u));
+  imp.urls = [];
+  const show = list.slice(0, 6);
+  show.forEach(f => {
+    const u = URL.createObjectURL(f);
+    imp.urls.push(u);
+    const img = new Image();
+    img.src = u;
+    img.alt = f.name;
+    pv.appendChild(img);
+  });
+  if (list.length > show.length) {
+    const d = document.createElement('div');
+    d.className = 'more';
+    d.textContent = `+${list.length - show.length} 张`;
+    pv.appendChild(d);
+  }
+  const bytes = list.reduce((a, f) => a + f.size, 0);
+  const mb = (bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1);
+  const el = $('#imgInfo');
+  el.textContent = `共 ${list.length} 页 · ${mb} MB`;
+  el.hidden = false;
+}
+
+function takeImages(files) {
+  imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
+  const arr = [...(files || [])].filter(f =>
+    /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
+  if (!arr.length) { impMsg('没有可用的图片（jpg / png / webp / gif）', 'err'); return; }
+
+  const seen = new Set(imp.images.map(f => f.name + ':' + f.size));
+  const merged = imp.images.slice();
+  arr.forEach(f => {
+    const k = f.name + ':' + f.size;
+    if (!seen.has(k)) { seen.add(k); merged.push(f); }
+  });
+  const path = f => f.webkitRelativePath || f.name;
+  merged.sort((a, b) => natKey(path(a)).localeCompare(natKey(path(b))));
+
+  let cut = false;
+  if (merged.length > 400) { merged.length = 400; cut = true; }
+  imp.images = merged;
+
+  // 选文件夹时用目录名当书名；只选一张时用文件名
+  const first = arr[0].webkitRelativePath || '';
+  if (!$('#impTitle').value.trim()) {
+    if (first.includes('/')) $('#impTitle').value = first.split('/')[0].slice(0, 120);
+    else if (arr.length === 1) $('#impTitle').value = arr[0].name.replace(/\.[^.]+$/, '').slice(0, 120);
+  }
+
+  renderImages();
+  impMsg(cut ? '单本上限 400 页，超出部分已忽略' : `已选 ${merged.length} 页，点「上传并阅读」入库`, cut ? 'err' : 'ok');
+}
+
+/* 带上传进度的 POST；fetch 拿不到上传进度，所以这里用 XHR */
+function xhrUpload(url, fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', url);
+    x.upload.onprogress = ev => {
+      if (ev.lengthComputable) onProgress(Math.round(ev.loaded / ev.total * 100));
+    };
+    x.onload = () => {
+      let j = {};
+      try { j = JSON.parse(x.responseText || '{}'); } catch (e) { }
+      if (x.status >= 200 && x.status < 300) return resolve(j);
+      const d = j.detail;
+      const msg = typeof d === 'string' ? d : (d && d.msg) || ('上传失败 ' + x.status);
+      const err = new Error(msg);
+      err.status = x.status;
+      err.body = j;
+      reject(err);
+    };
+    x.onerror = () => reject(new Error('网络中断，请重试'));
+    x.send(fd);
+  });
+}
+
+async function doImportImages(opts) {
+  if (imp.busy) return;
+  opts = opts || {};
+  const files = imp.images;
+  if (!files.length) { impMsg('请先选择图片', 'err'); return; }
+  const title = $('#impTitle').value.trim();   // 留空则服务端自动命名
+
+  imp.busy = true;
+  $('#impGo').disabled = true;
+  const BATCH = 24;          // 每批 24 张，几百页也不会把网关拖到超时
+  let id = imp.resumeId || '';   // 上次中断时就接着往这本书里补
+  let added = 0;
+  let skipped = 0;
+  let sent = 0;
+
+  try {
+    for (let i = 0; i < files.length; i += BATCH) {
+      const chunk = files.slice(i, i + BATCH);
+      const fd = new FormData();
+      chunk.forEach(f => fd.append('files', f, f.name));
+      if (!id) {
+        fd.append('title', title);
+        fd.append('author', $('#impAuthor').value.trim());
+        fd.append('cat', $('#impCat').value);
+        if ($('#impHidden').checked) fd.append('hidden', '1');
+        if (opts.replace) fd.append('replace', opts.replace);
+        if (opts.duplicate) fd.append('allow_duplicate', '1');
+      } else {
+        fd.append('append', id);
+      }
+
+      const range = `${i + 1}–${i + chunk.length}`;
+      impMsg(`正在处理第 ${range} 页 / 共 ${files.length} 页…`);
+      const j = await xhrUpload('/api/import/images', fd, pct => {
+        impMsg(`正在上传第 ${range} 页 / 共 ${files.length} 页 · ${pct}%`);
+      });
+      id = j.id || id;
+      added += j.added || 0;
+      skipped += j.skipped || 0;
+      sent += chunk.length;
+    }
+
+    imp.resumeId = '';
+    imp.busy = false;
+    $('#impGo').disabled = false;
+    closeImp();
+    await loadShelf(state.hidden);
+    openBook(id, false);
+  } catch (e) {
+    if (e.status === 409 && !opts.replace && !opts.duplicate) {
+      const d = (e.body && e.body.detail && e.body.detail.conflict) || {};
+      const yes = confirm(
+        `已存在同名书籍《${d.title || title}》${d.n ? '（' + d.n + ' 页/节）' : ''}。\n\n` +
+        '确定：用这批图片覆盖它，旧页会被清空；\n' +
+        '取消：另存为一本新书。'
+      );
+      imp.busy = false;
+      $('#impGo').disabled = false;
+      if (yes) await doImportImages({ replace: d.id || '' });
+      else await doImportImages({ duplicate: true });
+      return;
+    }
+    imp.busy = false;
+    $('#impGo').disabled = false;
+    const extra = skipped ? `（${skipped} 页被跳过）` : '';
+
+    // 已经建好书、只是后面几批失败：记住断点，下次只补剩下的页，避免重复
+    if (id && sent < files.length) {
+      imp.resumeId = id;
+      imp.images = files.slice(sent);
+      renderImages();
+      $('#impGo').textContent = '继续上传';
+      impMsg(`已传 ${sent} / ${files.length} 页，后面失败了：${e.message || e}${extra}。` +
+             `点「继续上传」只补剩下的 ${files.length - sent} 页。`, 'err');
+      return;
+    }
+    impMsg(String(e.message || e) + extra, 'err');
+  }
+}
+
+$('#impTabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-tab]');
+  if (b) setTab(b.dataset.tab);
+});
+$('#imgDrop').addEventListener('click', () => $('#imgFile').click());
+$('#imgDrop').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#imgFile').click(); }
+});
+$('#imgPickDir').addEventListener('click', e => { e.stopPropagation(); $('#imgDir').click(); });
+$('#imgFile').addEventListener('change', e => { takeImages(e.target.files); e.target.value = ''; });
+$('#imgDir').addEventListener('change', e => { takeImages(e.target.files); e.target.value = ''; });
+['dragenter', 'dragover'].forEach(t => $('#imgDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#imgDrop').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(t => $('#imgDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#imgDrop').classList.remove('over');
+}));
+$('#imgDrop').addEventListener('drop', e => {
+  const dt = e.dataTransfer;
+  if (dt && dt.files && dt.files.length) takeImages(dt.files);
+});
+
 async function delBook() {
   const b = state.book;
   if (!b) return;
@@ -832,6 +1117,6 @@ $('#impDrop').addEventListener('drop', e => {
   const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
   if (f) takeFile(f);
 });
-$('#impGo').addEventListener('click', doImport);
+$('#impGo').addEventListener('click', () => (imp.tab === 'image' ? doImportImages() : doImport()));
 $('#delBtn').addEventListener('click', delBook);
 $('#impText').addEventListener('input', () => { if ($('#impText').value.trim()) impMsg(''); });

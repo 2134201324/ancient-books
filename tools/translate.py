@@ -13,7 +13,7 @@
   export OPENAI_BASE_URL=https://xxx/v1
   export OPENAI_API_KEY=sk-xxx
   python3.11 tools/translate.py --book en59 \\
-      --model gpt-4o-mini --books-dir data/books --lib data/library.json
+      --model MiMo-V2.6-Flash --books-dir data/books --lib data/library.json
 
 断点续传：重复运行同一命令即可，已完成的章节会自动跳过。
 """
@@ -120,7 +120,7 @@ def main():
     ap.add_argument("--lib", default="data/library.json")
     ap.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL", ""))
     ap.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", ""))
-    ap.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    ap.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "MiMo-V2.6-Flash"))
     ap.add_argument("--force", action="store_true", help="忽略已有译文，全部重译")
     args = ap.parse_args()
 
