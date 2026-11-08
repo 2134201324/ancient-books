@@ -721,7 +721,20 @@ async function loadShelf(hidden) {
 
 
 /* ---------- 导入书籍 ---------- */
-const imp = { text: '', busy: false, mode: '', tab: 'text', images: [], urls: [], resumeId: '' };
+/* 文本与图片共用一个导入面板：拖进来什么就建什么书，不必先选类型。
+   imp.text 存文本文件正文，imp.images 存待上传的图片，两者可同时存在，
+   提交时先建文本书、再建漫画书。 */
+const imp = {
+  text: '',        // 文本文件正文，'' 表示没选文件
+  mode: '',        // '' | 'file'
+  images: [],      // 待上传图片（含粘贴）
+  urls: [],
+  resumeId: '',    // 图片上传中断后的续传书号
+  sort: 'name',    // name | time-asc | time-desc | manual
+  dragFrom: -1,    // 正在拖动的缩略图序号
+  chain: 0,        // 混合提交时的剩余任务数
+  lastId: '',      // 混合提交里最后一本书的 id
+};
 
 function impMsg(text, kind) {
   const el = $('#impMsg');
@@ -733,8 +746,8 @@ function openImp() {
   const row = $('#impHiddenRow');
   row.hidden = !state.hidden;
   $('#impHidden').checked = !!state.hidden;
-  setTab(imp.tab);
   $('#impModal').hidden = false;
+  syncImp();
   setTimeout(() => $('#impTitle').focus(), 40);
 }
 
@@ -744,8 +757,10 @@ function closeImp() {
   imp.text = '';
   imp.mode = '';
   imp.resumeId = '';
+  imp.chain = 0;
   clearImages();
   $('#impFile').value = '';
+  $('#impDir').value = '';
   $('#impTitle').value = '';
   $('#impAuthor').value = '';
   const ta = $('#impText');
@@ -778,12 +793,31 @@ function clearFile() {
   $('#impFname').hidden = true;
   $('#impFname').textContent = '';
   const ta = $('#impText');
-  if (ta.readOnly) {
-    ta.readOnly = false;
-    ta.value = '';
-    ta.classList.remove('ro');
-  }
-  impMsg('已清除文件，可直接粘贴正文', '');
+  ta.readOnly = false;
+  ta.value = '';
+  ta.classList.remove('ro');
+  syncImp();
+  impMsg(stageHint(), '');
+}
+
+/* 根据当前暂存内容刷新面板：显隐、按钮文案、书名占位符 */
+function stageHint() {
+  const hasT = !!imp.text;
+  const n = imp.images.length;
+  if (hasT && n) return `文本 ${imp.text.length.toLocaleString()} 字 + 图片 ${n} 页，将分别入库 2 本（文字书 + 漫画书）`;
+  if (hasT) return `已读取 ${imp.text.length.toLocaleString()} 字，点「导入并阅读」入库`;
+  if (n) return `已选 ${n} 页，点「上传并阅读」入库`;
+  return '';
+}
+
+function syncImp() {
+  const hasT = !!imp.text;
+  const n = imp.images.length;
+  $('#impStage').hidden = n === 0;
+  const ta = $('#impText');
+  ta.hidden = n > 0;          // 有图时收起正文框，避免两块输入区互相干扰
+  $('#impGo').textContent = hasT && n ? '导入 2 本' : (n ? '上传并阅读' : '导入并阅读');
+  $('#impTitle').placeholder = (n && !hasT) ? '留空则自动命名' : '留空则用文件名';
 }
 
 async function takeFile(f) {
@@ -805,7 +839,8 @@ async function takeFile(f) {
   ta.readOnly = true;
   ta.classList.add('ro');
   setFileInfo(f.name, t.length);
-  impMsg('已读取，点「导入并阅读」入库（文本框内为前 600 字预览）', 'ok');
+  syncImp();
+  impMsg(stageHint(), 'ok');
 }
 
 async function doImport(opts) {
@@ -859,34 +894,55 @@ async function doImport(opts) {
 
     let note = (j.updated ? '已更新：' : '已入库：') + j.title + ' · ' + j.n + ' 节';
     if (j.updated) note += ' · 保留译文 ' + (j.kept_chapters || 0) + ' 章';
-    impMsg(note, 'ok');
-    imp.busy = false;
-    $('#impGo').disabled = false;
-    closeImp();
-    await loadShelf(state.hidden);
-    openBook(j.id, false);
+    if (await finishTask(j.id)) {
+      impMsg(note, 'ok');
+      await loadShelf(state.hidden);
+      openBook(j.id, false);
+    }
   } catch (e) {
-    imp.busy = false;
-    $('#impGo').disabled = false;
-    impMsg(String(e.message || e), 'err');
+    failTask(String(e.message || e));
   }
 }
 
-/* ---------- 导入：图片 / 漫画 ---------- */
-function setTab(t) {
-  imp.tab = t === 'image' ? 'image' : 'text';
-  [...$('#impTabs').children].forEach(x => x.classList.toggle('on', x.dataset.tab === imp.tab));
-  $('#impTextPane').hidden = imp.tab !== 'text';
-  $('#impImgPane').hidden = imp.tab !== 'image';
-  $('#impGo').textContent = imp.tab === 'image' ? '上传并阅读' : '导入并阅读';
-  $('#impTitle').placeholder = imp.tab === 'image' ? '留空则自动命名' : '留空则用文件名';
-  impMsg('');
+/* 一个任务做完：混合提交时接着做下一个，否则收尾开书 */
+async function finishTask(id) {
+  imp.lastId = id || imp.lastId;
+  imp.chain = Math.max(0, imp.chain - 1);
+  imp.busy = false;
+  $('#impGo').disabled = false;
+  if (imp.chain > 0) {      // 还有图片要传，弹窗留着
+    impMsg('文字已入库，正在处理图片…');
+    return false;
+  }
+  const last = imp.lastId;
+  closeImp();
+  if (last && last !== id) openBook(last, false);
+  return true;
 }
 
+function failTask(msg) {
+  imp.chain = 0;
+  imp.busy = false;
+  $('#impGo').disabled = false;
+  impMsg(msg, 'err');
+}
+
+/* ---------- 导入：图片 / 漫画 ---------- */
 /* 文件名自然排序：1、2、10 而不是 1、10、2 */
 function natKey(name) {
   return String(name || '').split(/(\d+)/)
     .map(x => (/^\d+$/.test(x) ? x.padStart(9, '0') : x.toLowerCase())).join('');
+}
+
+/* 相对路径：选文件夹带 webkitRelativePath，拖文件夹由我们补 relPath */
+const relPath = f => f.webkitRelativePath || f.relPath || f.name;
+
+/* 按当前排序依据重排；manual 时保留数组顺序（拖动结果） */
+function applySort() {
+  const byName = (a, b) => natKey(relPath(a)).localeCompare(natKey(relPath(b)));
+  if (imp.sort === 'time-asc') imp.images.sort((a, b) => (a.lastModified - b.lastModified) || byName(a, b));
+  else if (imp.sort === 'time-desc') imp.images.sort((a, b) => (b.lastModified - a.lastModified) || byName(a, b));
+  else if (imp.sort === 'name') imp.images.sort(byName);
 }
 
 function clearImages() {
@@ -895,68 +951,163 @@ function clearImages() {
   imp.urls = [];
   const pv = $('#imgPrev');
   if (pv) pv.innerHTML = '';
-  const info = $('#imgInfo');
-  if (info) { info.hidden = true; info.textContent = ''; }
+  const sum = $('#impSummary');
+  if (sum) sum.textContent = '';
 }
 
+/* 暂存区：每张图带页序、可拖动排序、可单独移除 */
 function renderImages() {
   const list = imp.images;
   const pv = $('#imgPrev');
   pv.innerHTML = '';
   imp.urls.forEach(u => URL.revokeObjectURL(u));
   imp.urls = [];
-  const show = list.slice(0, 6);
-  show.forEach(f => {
+
+  list.forEach((f, i) => {
     const u = URL.createObjectURL(f);
     imp.urls.push(u);
+
+    const box = document.createElement('div');
+    box.className = 'pgitem';
+    box.draggable = true;
+    box.dataset.i = i;
+    box.title = relPath(f);
+
     const img = new Image();
     img.src = u;
-    img.alt = f.name;
-    pv.appendChild(img);
+    img.alt = relPath(f);
+    box.appendChild(img);
+
+    const no = document.createElement('span');
+    no.className = 'no';
+    no.textContent = i + 1;
+    box.appendChild(no);
+
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'rm';
+    x.textContent = '✕';
+    x.title = '移除这一页';
+    x.addEventListener('click', ev => { ev.stopPropagation(); dropImage(i); });
+    box.appendChild(x);
+
+    pv.appendChild(box);
   });
-  if (list.length > show.length) {
-    const d = document.createElement('div');
-    d.className = 'more';
-    d.textContent = `+${list.length - show.length} 张`;
-    pv.appendChild(d);
-  }
+
   const bytes = list.reduce((a, f) => a + f.size, 0);
   const mb = (bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1);
-  const el = $('#imgInfo');
-  el.textContent = `共 ${list.length} 页 · ${mb} MB`;
-  el.hidden = false;
+  $('#impSummary').textContent = `共 ${list.length} 页 · ${mb} MB`;
+  $('#imgHint').hidden = list.length < 2;
+}
+
+function moveImage(from, to) {
+  if (from === to || from < 0 || to < 0 || from >= imp.images.length) return;
+  const [f] = imp.images.splice(from, 1);
+  imp.images.splice(to, 0, f);
+  imp.sort = 'manual';               // 手动调过就以手序为准，不再被自动排序覆盖
+  $('#impSort').value = 'manual';
+  renderImages();
+  impMsg(stageHint(), 'ok');
+}
+
+function dropImage(i) {
+  imp.images.splice(i, 1);
+  renderImages();
+  syncImp();
+  impMsg(stageHint() || '已移除，可继续选择或粘贴', '');
 }
 
 function takeImages(files, from) {
-  imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
+  if (from !== 'paste') imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
   const arr = [...(files || [])].filter(f =>
     /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
   if (!arr.length) { impMsg('没有可用的图片（jpg / png / webp / gif）', 'err'); return; }
 
-  const seen = new Set(imp.images.map(f => f.name + ':' + f.size));
-  const merged = imp.images.slice();
+  const seen = new Set(imp.images.map(f => relPath(f) + ':' + f.size));
   arr.forEach(f => {
-    const k = f.name + ':' + f.size;
-    if (!seen.has(k)) { seen.add(k); merged.push(f); }
+    const k = relPath(f) + ':' + f.size;
+    if (!seen.has(k)) { seen.add(k); imp.images.push(f); }
   });
-  const path = f => f.webkitRelativePath || f.name;
-  merged.sort((a, b) => natKey(path(a)).localeCompare(natKey(path(b))));
+
+  applySort();
 
   let cut = false;
-  if (merged.length > 400) { merged.length = 400; cut = true; }
-  imp.images = merged;
+  if (imp.images.length > 400) { imp.images.length = 400; cut = true; }
 
   // 选文件夹时用目录名当书名；只选一张时用文件名。
   // 粘贴进来的图没有像样的名字，不拿它当书名。
-  const first = arr[0].webkitRelativePath || '';
-  if (from !== 'paste' && !$('#impTitle').value.trim()) {
+  const first = relPath(arr[0]);
+  if (from !== 'paste' && !imp.text && !$('#impTitle').value.trim()) {
     if (first.includes('/')) $('#impTitle').value = first.split('/')[0].slice(0, 120);
     else if (arr.length === 1) $('#impTitle').value = arr[0].name.replace(/\.[^.]+$/, '').slice(0, 120);
   }
 
   renderImages();
-  const pre = from === 'paste' ? '已粘贴' : '已选';
-  impMsg(cut ? '单本上限 400 页，超出部分已忽略' : `${pre} ${merged.length} 页，点「上传并阅读」入库`, cut ? 'err' : 'ok');
+  syncImp();
+  impMsg(cut ? '单本上限 400 页，超出部分已忽略' : stageHint(), cut ? 'err' : 'ok');
+}
+
+/* 统一入口：拖进来 / 选进来的东西按类型分流，文本进正文、图片进暂存区 */
+async function takeFiles(files, opts) {
+  opts = opts || {};
+  const all = [...(files || [])];
+  const imgs = all.filter(f =>
+    /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
+  const txts = all.filter(f =>
+    !imgs.includes(f) && (/^text\//.test(f.type) || /\.(txt|md|text)$/i.test(f.name)));
+
+  if (txts.length) {
+    if (imp.text) impMsg('只接收一个文本文件，已用新的替换旧的', '');
+    await takeFile(txts[0]);
+    if (txts.length > 1) impMsg(`一次只导入一个文本文件，已取《${txts[0].name}》`, 'err');
+  }
+
+  if (imgs.length) takeImages(imgs, opts.from);
+
+  const other = all.length - imgs.length - txts.length;
+  if (!imgs.length && !txts.length) {
+    impMsg(other ? '只能导入 .txt / .md 文本或图片' : '没有可导入的文件', 'err');
+  } else if (other > 0 && !imp.text) {
+    impMsg(`已忽略 ${other} 个不支持的文件`, '');
+  }
+}
+
+/* 拖拽：文件和文件夹一起接，文件夹递归展开 */
+function readEntries(reader) {
+  return new Promise((res, rej) => reader.readEntries(res, rej));
+}
+
+async function walkEntry(entry, prefix, out) {
+  if (entry.isFile) {
+    const f = await new Promise((res, rej) => entry.file(res, rej));
+    try { Object.defineProperty(f, 'relPath', { value: prefix + f.name, configurable: true }); }
+    catch (e) { }
+    out.push(f);
+    return;
+  }
+  if (!entry.isDirectory) return;
+  const reader = entry.createReader();
+  const dir = prefix + entry.name + '/';
+  for (; ;) {
+    const batch = await readEntries(reader);
+    if (!batch.length) break;
+    for (const e of batch) await walkEntry(e, dir, out);
+  }
+}
+
+async function filesFromDrop(dt) {
+  const entries = [];
+  for (const it of (dt.items || [])) {
+    if (it.kind !== 'file') continue;
+    const e = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if (e) entries.push(e);
+  }
+  if (entries.length) {
+    const out = [];
+    for (const e of entries) await walkEntry(e, '', out);
+    if (out.length) return out;
+  }
+  return [...(dt.files || [])];
 }
 
 /* 带上传进度的 POST；fetch 拿不到上传进度，所以这里用 XHR */
@@ -988,7 +1139,8 @@ async function doImportImages(opts) {
   opts = opts || {};
   const files = imp.images;
   if (!files.length) { impMsg('请先选择图片', 'err'); return; }
-  const title = $('#impTitle').value.trim();   // 留空则服务端自动命名
+  // 混合提交时图片书不跟文字书抢同一个名字，留空让服务端自动命名
+  const title = opts.titleOverride !== undefined ? opts.titleOverride : $('#impTitle').value.trim();
 
   imp.busy = true;
   $('#impGo').disabled = true;
@@ -1026,11 +1178,10 @@ async function doImportImages(opts) {
     }
 
     imp.resumeId = '';
-    imp.busy = false;
-    $('#impGo').disabled = false;
-    closeImp();
-    await loadShelf(state.hidden);
-    openBook(id, false);
+    if (await finishTask(id)) {
+      await loadShelf(state.hidden);
+      openBook(id, false);
+    }
   } catch (e) {
     if (e.status === 409 && !opts.replace && !opts.duplicate) {
       const d = (e.body && e.body.detail && e.body.detail.conflict) || {};
@@ -1047,6 +1198,7 @@ async function doImportImages(opts) {
     }
     imp.busy = false;
     $('#impGo').disabled = false;
+    imp.chain = 0;
     const extra = skipped ? `（${skipped} 页被跳过）` : '';
 
     // 已经建好书、只是后面几批失败：记住断点，下次只补剩下的页，避免重复
@@ -1063,27 +1215,85 @@ async function doImportImages(opts) {
   }
 }
 
-$('#impTabs').addEventListener('click', e => {
-  const b = e.target.closest('[data-tab]');
-  if (b) setTab(b.dataset.tab);
+/* ---------- 导入面板：统一拖放区 ---------- */
+$('#impDrop').addEventListener('click', () => $('#impFile').click());
+$('#impDrop').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#impFile').click(); }
 });
-$('#imgDrop').addEventListener('click', () => $('#imgFile').click());
-$('#imgDrop').addEventListener('keydown', e => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#imgFile').click(); }
+$('#impPickDir').addEventListener('click', e => {
+  e.stopPropagation();            // 别同时弹出「选文件」
+  $('#impDir').click();
 });
-$('#imgPickDir').addEventListener('click', e => { e.stopPropagation(); $('#imgDir').click(); });
-$('#imgFile').addEventListener('change', e => { takeImages(e.target.files); e.target.value = ''; });
-$('#imgDir').addEventListener('change', e => { takeImages(e.target.files); e.target.value = ''; });
-['dragenter', 'dragover'].forEach(t => $('#imgDrop').addEventListener(t, e => {
-  e.preventDefault(); $('#imgDrop').classList.add('over');
+
+$('#impFile').addEventListener('change', e => {
+  takeFiles(e.target.files);
+  e.target.value = '';            // 允许重复选同一批文件
+});
+$('#impDir').addEventListener('change', e => {
+  takeFiles(e.target.files);
+  e.target.value = '';
+});
+
+['dragenter', 'dragover'].forEach(t => $('#impDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#impDrop').classList.add('over');
 }));
-['dragleave', 'drop'].forEach(t => $('#imgDrop').addEventListener(t, e => {
-  e.preventDefault(); $('#imgDrop').classList.remove('over');
+['dragleave', 'drop'].forEach(t => $('#impDrop').addEventListener(t, e => {
+  e.preventDefault(); $('#impDrop').classList.remove('over');
 }));
-$('#imgDrop').addEventListener('drop', e => {
-  const dt = e.dataTransfer;
-  if (dt && dt.files && dt.files.length) takeImages(dt.files);
+$('#impDrop').addEventListener('drop', async e => {
+  if (imp.dragFrom >= 0) return;  // 内部缩略图在拖动，不是外部文件
+  const files = await filesFromDrop(e.dataTransfer);
+  if (files.length) takeFiles(files);
 });
+
+/* 排序下拉：名称 / 时间 / 手动 */
+$('#impSort').addEventListener('change', e => {
+  imp.sort = e.target.value;
+  applySort();
+  renderImages();
+  impMsg(stageHint(), 'ok');
+});
+
+/* 缩略图拖动排序：松手即生效，并把排序切到「手动」 */
+const pv = $('#imgPrev');
+pv.addEventListener('dragstart', e => {
+  const it = e.target.closest('.pgitem');
+  if (!it) return;
+  imp.dragFrom = +it.dataset.i;
+  it.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', String(imp.dragFrom)); } catch (err) { }
+});
+pv.addEventListener('dragend', () => {
+  imp.dragFrom = -1;
+  [...pv.children].forEach(x => x.classList.remove('dragging', 'over'));
+});
+pv.addEventListener('dragover', e => {
+  if (imp.dragFrom < 0) return;
+  e.preventDefault();
+  e.stopPropagation();            // 别让外层拖放区跟着高亮
+  const it = e.target.closest('.pgitem');
+  [...pv.children].forEach(x => x.classList.toggle('over', x === it && +x.dataset.i !== imp.dragFrom));
+});
+pv.addEventListener('dragleave', e => {
+  const it = e.target.closest('.pgitem');
+  if (it) it.classList.remove('over');
+});
+pv.addEventListener('drop', e => {
+  if (imp.dragFrom < 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const it = e.target.closest('.pgitem');
+  if (it) moveImage(imp.dragFrom, +it.dataset.i);
+  imp.dragFrom = -1;
+});
+
+/* 触屏没有 hover、也没有 HTML5 拖放：去掉「手动拖动」，改用 ✕ 删页 */
+if (window.matchMedia('(hover:none)').matches) {
+  const opt = $('#impSort').querySelector('option[value="manual"]');
+  if (opt) opt.remove();
+  $('#imgHint').textContent = '点缩略图右上角 ✕ 可移除某一页';
+}
 
 async function delBook() {
   const b = state.book;
@@ -1103,21 +1313,6 @@ async function delBook() {
 $('#impBtn').addEventListener('click', openImp);
 $('#impModal').addEventListener('click', e => {
   if (e.target.closest('[data-close]')) closeImp();
-});
-$('#impDrop').addEventListener('click', () => $('#impFile').click());
-$('#impDrop').addEventListener('keydown', e => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#impFile').click(); }
-});
-$('#impFile').addEventListener('change', e => takeFile(e.target.files[0]));
-['dragenter', 'dragover'].forEach(t => $('#impDrop').addEventListener(t, e => {
-  e.preventDefault(); $('#impDrop').classList.add('over');
-}));
-['dragleave', 'drop'].forEach(t => $('#impDrop').addEventListener(t, e => {
-  e.preventDefault(); $('#impDrop').classList.remove('over');
-}));
-$('#impDrop').addEventListener('drop', e => {
-  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) takeFile(f);
 });
 
 /* ---------- 粘贴导入：截图 / 复制的图片 / .txt·.md 文件，Ctrl+V 直接进弹窗 ---------- */
@@ -1159,7 +1354,6 @@ document.addEventListener('paste', e => {
       /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name || ''));
     if (imgs.length) {
       e.preventDefault();
-      setTab('image');                       // 切到图片页，粘贴的图立刻能看到缩略图
       const base = imp.images.length;
       takeImages(imgs.map((f, i) => clipImage(f, i, base)), 'paste');
       return;
@@ -1177,7 +1371,7 @@ document.addEventListener('paste', e => {
   const el = document.activeElement;
   if (el && el.id === 'impText') return;      // 正文框自己会处理，不抢
   if (t.length <= 120 && !t.includes('\n')) return;   // 短词多半是在填书名/作者，放行
-  if (imp.tab !== 'text') return;            // 图片页不接管文本
+  if (imp.images.length) return;              // 暂存区已有图片，正文框是收起的
   e.preventDefault();
   if (imp.mode === 'file') { impMsg('已选文件，先点「清除」再粘贴正文', 'err'); return; }
   const ta = $('#impText');
@@ -1187,6 +1381,25 @@ document.addEventListener('paste', e => {
   ta.value = (cur ? cur + '\n\n' : '') + t;
   impMsg(`已粘贴 ${t.length.toLocaleString()} 字，可继续粘贴，或点「导入并阅读」`, 'ok');
 });
-$('#impGo').addEventListener('click', () => (imp.tab === 'image' ? doImportImages() : doImport()));
+/* 提交：按暂存内容决定建几本。文本先入库（快），图片走后台上传。 */
+async function submit() {
+  if (imp.busy) return;
+  const typed = ($('#impText').value || '').trim();
+  const text = (imp.mode === 'file' && imp.text) ? imp.text : typed;
+  const n = imp.images.length;
+
+  if (!text && !n) return impMsg('请先选择文件、图片，或粘贴正文', 'err');
+  if (text && text.length < 200) return impMsg('正文太短，至少 200 字', 'err');
+  if (text.length > 6000000) return impMsg('正文超过 600 万字，请先拆分', 'err');
+
+  const hasT = !!text;
+  imp.chain = (hasT ? 1 : 0) + (n ? 1 : 0);
+  imp.lastId = '';
+
+  if (hasT) await doImport();
+  if (n && imp.chain > 0) await doImportImages({ titleOverride: hasT ? '' : undefined });
+}
+
+$('#impGo').addEventListener('click', submit);
 $('#delBtn').addEventListener('click', delBook);
 $('#impText').addEventListener('input', () => { if ($('#impText').value.trim()) impMsg(''); });
