@@ -53,7 +53,7 @@
   <div class="rtop">
     <button class="icon" id="back" title="返回书架">←</button>
     <div class="rtitle"><b id="btitle"></b><span id="bauthor"></span></div>
-    <button class="icon sm" id="delBtn" title="删除这本导入的书" hidden>删</button>
+    <button class="icon sm" id="delBtn" title="彻底删除这本书（不可恢复）" hidden>删</button>
     <button class="icon" id="tocBtn" title="目录">☰</button>
   </div>
 
@@ -72,15 +72,23 @@
 
   <div class="stage">
     <aside class="toc" id="toc"><div class="tocHead">目录</div><div class="tocList" id="tocList"></div></aside>
-    <article class="paper">
-      <h2 id="ctitle"></h2>
-      <div class="txbar" id="txbar" hidden></div>
-      <div id="text" class="text"></div>
-      <nav class="pager">
-        <button id="prevCh" title="上一回（A / ←）">← 上一回</button>
-        <button id="nextCh" title="下一回（D / →）">下一回 →</button>
-      </nav>
-    </article>
+    <div class="pwrap">
+      <article class="paper">
+        <h2 id="ctitle"></h2>
+        <div class="txbar" id="txbar" hidden></div>
+        <div id="text" class="text"></div>
+        <nav class="pager">
+          <button id="prevCh" title="上一回（A / ←）">← 上一回</button>
+          <button id="nextCh" title="下一回（D / →）">下一回 →</button>
+        </nav>
+      </article>
+      <div class="flips">
+        <button type="button" class="flip fl" id="flipPrev" tabindex="-1"
+                aria-label="上一页" title="上一页（也可按 W / ↑）">‹</button>
+        <button type="button" class="flip fr" id="flipNext" tabindex="-1"
+                aria-label="下一页" title="下一页（也可按 S / ↓）">›</button>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -101,10 +109,10 @@
         </select>
       </label>
       <div class="drop" id="impDrop" tabindex="0">
-        <input type="file" id="impFile" accept=".txt,.md,.text,text/plain,image/*" multiple hidden>
+        <input type="file" id="impFile" accept=".txt,.md,.text,text/plain,image/*,.zip,application/zip,application/x-zip-compressed" multiple hidden>
         <input type="file" id="impDir" webkitdirectory directory multiple hidden>
-        <p><b>把 .txt / .md 或整批图片拖到这里</b>，或 <span class="lnk">选择文件</span> / <span class="lnk" id="impPickDir">整个文件夹</span></p>
-        <p class="hint">文本入库成书，图片入库成漫画，可一次混选；也可以 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图</p>
+        <p><b>把 .txt / .md 或整批图片拖到这里</b>，或 <span class="lnk">选择文件</span><span id="impDirWrap"> / <span class="lnk" id="impPickDir">整个文件夹</span></span> / <span class="lnk" id="impPickZip">ZIP 压缩包</span></p>
+        <p class="hint" id="impDropHint">文本入库成书，图片入库成漫画，可一次混选；也可以 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图</p>
       </div>
 
       <p class="fname" id="impFname" hidden></p>
@@ -129,8 +137,8 @@
       <label class="chk" id="impHiddenRow" hidden>
         <input type="checkbox" id="impHidden"> 放入隐藏书柜（不在公开书架显示）
       </label>
-      <div class="impmsg" id="impMsg"></div>
     </div>
+    <div class="impmsg" id="impMsg"></div>
     <div class="pfoot">
       <button class="ghost" data-close>取消</button>
       <button class="primary" id="impGo">导入并阅读</button>

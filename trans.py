@@ -343,6 +343,17 @@ def load_cache(bid: str, idx: int) -> dict | None:
         return None
 
 
+def drop_cache(bid: str, idx: int) -> None:
+    """译文已经合并进书里时，删掉这份重复的缓存文件。
+
+    index.json 保留：目录译名和「已译」标记还要读它，且它只有几百字节。
+    """
+    try:
+        os.remove(_cache_path(bid, idx))
+    except OSError:
+        pass
+
+
 def _index_path(bid: str) -> str:
     return os.path.join(CACHE_DIR, bid, "index.json")
 

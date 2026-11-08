@@ -200,6 +200,20 @@ def build(title: str, author: str, text: str, cat: str = "其他", hidden: bool 
 _lock = threading.Lock()
 
 
+def _read_lib() -> list:
+    if not os.path.exists(LIB_PATH):
+        return []
+    with open(LIB_PATH, encoding="utf-8") as f:
+        return json.load(f) or []
+
+
+def _write_lib(lib: list) -> None:
+    tmp = LIB_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lib, f, ensure_ascii=False)
+    os.replace(tmp, LIB_PATH)
+
+
 def save(book: dict) -> None:
     """写书 + 追加书库索引，两步都原子替换。"""
     with _lock:
@@ -210,32 +224,20 @@ def save(book: dict) -> None:
             json.dump(book, f, ensure_ascii=False)
         os.replace(tmp, path)
 
-        lib = []
-        if os.path.exists(LIB_PATH):
-            with open(LIB_PATH, encoding="utf-8") as f:
-                lib = json.load(f) or []
+        lib = _read_lib()
         lib = [b for b in lib if b.get("id") != book["id"]]
         lib.append({k: v for k, v in book.items() if k != "chapters"})
-        tmp = LIB_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(lib, f, ensure_ascii=False)
-        os.replace(tmp, LIB_PATH)
+        _write_lib(lib)
 
 
 def delete(bid: str) -> bool:
+    """彻底删除一本书：正文文件与索引条目一起清理。"""
     with _lock:
         path = os.path.join(BOOKS, bid + ".json.gz")
         if not os.path.exists(path):
             return False
         os.remove(path)
-        if os.path.exists(LIB_PATH):
-            with open(LIB_PATH, encoding="utf-8") as f:
-                lib = json.load(f) or []
-            lib = [b for b in lib if b.get("id") != bid]
-            tmp = LIB_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(lib, f, ensure_ascii=False)
-            os.replace(tmp, LIB_PATH)
+        _write_lib([b for b in _read_lib() if b.get("id") != bid])
         return True
 
 
@@ -258,6 +260,7 @@ def find_conflict(title: str, author: str = "", hidden: bool = False) -> dict | 
     """找同名书：书名归一后相同即可，作者只作加分项（导出的 txt 常缺作者）。
 
     只在同一可见性范围内比对，避免公开导入时把隐藏书的名字抖出来。
+    有多本同名时：作者相同者优先，其次按加入时间倒序——用户想更新的通常是最近导入的那本。
     """
     t = _key(title)
     if not t:
@@ -271,35 +274,14 @@ def find_conflict(title: str, author: str = "", hidden: bool = False) -> dict | 
             continue
         ba = _key(b.get("author", ""))
         same_author = bool(a and ba and a == ba)
-        cands.append((0 if same_author else 1, b))
+        cands.append((0 if same_author else 1, -(b.get("added") or 0), b))
     if not cands:
         return None
-    cands.sort(key=lambda x: x[0])
-    return cands[0][1]
-
-
-def _backup(bid: str) -> str:
-    """覆盖前留一份原书，改坏了还能捞回来。"""
-    src = os.path.join(BOOKS, bid + ".json.gz")
-    if not os.path.exists(src):
-        return ""
-    bak_dir = os.path.join(BOOKS, ".bak")
-    os.makedirs(bak_dir, exist_ok=True)
-    dst = os.path.join(bak_dir, f"{bid}-{int(time.time())}.json.gz")
-    with open(src, "rb") as f, open(dst, "wb") as g:
-        g.write(f.read())
-    # 只留最近三份，避免反复更新把磁盘堆满
-    olds = sorted(
-        (os.path.join(bak_dir, n) for n in os.listdir(bak_dir) if n.startswith(bid + "-")),
-        key=os.path.getmtime,
-        reverse=True,
-    )
-    for p in olds[3:]:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-    return dst
+    cands.sort(key=lambda x: (x[0], x[1]))
+    hit = cands[0][2]
+    hit = dict(hit)
+    hit["_same_title"] = len(cands)
+    return hit
 
 
 def replace(bid: str, new: dict) -> dict:
@@ -309,8 +291,6 @@ def replace(bid: str, new: dict) -> dict:
         raise FileNotFoundError(bid)
     with gzip.open(old_path, "rt", encoding="utf-8") as f:
         old = json.load(f)
-
-    bak = _backup(bid)
 
     # 章标题归一后对齐；只有段落数完全一致才敢沿用旧译文，否则宁可重译
     oldmap = {}
@@ -363,4 +343,4 @@ def replace(bid: str, new: dict) -> dict:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False)
         os.replace(tmp, LIB_PATH)
-    return {"kept_chapters": kept, "backup": os.path.basename(bak) if bak else ""}
+    return {"kept_chapters": kept}

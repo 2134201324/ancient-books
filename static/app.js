@@ -142,7 +142,7 @@ async function openBook(id, resume = true) {
     state.toc = meta.toc;
     state.tr = !!meta.translate;
     $('#btitle').textContent = meta.title;
-    $('#delBtn').hidden = !id.startsWith('u');
+    $('#delBtn').hidden = false;   // 内置书与导入书都能删，口令在点击后校验
     const isEn = meta.lang === 'en';
     const isImg = meta.type === 'image';
     $('#text').classList.toggle('imgs', isImg);
@@ -219,7 +219,7 @@ async function loadChapter(idx, scrollTop = true) {
     setPos(state.book.id, idx);
     pushRecent(state.book.id, idx);
     markToc();
-    if (scrollTop) $('.paper').scrollTop = 0;
+    if (scrollTop) jumpTo(0);
     const on = $('#tocList').children[idx];
     if (on) on.scrollIntoView({ block: 'nearest' });
   } finally {
@@ -595,6 +595,15 @@ $('#cnModes').addEventListener('click', e => {
 const held = { up: false, down: false };
 const sc = { raf: 0, dir: 0, vel: 380, last: 0, until: 0 };
 
+/* 立即定位：临时关掉 CSS 平滑，避免切章时从上一章的位置一路滑过去 */
+function jumpTo(top) {
+  const p = document.querySelector('.paper');
+  if (!p) return;
+  p.style.scrollBehavior = 'auto';
+  p.scrollTop = top;
+  requestAnimationFrame(() => { if (!sc.raf) p.style.scrollBehavior = ''; });
+}
+
 function scrollStart(dir) {
   const paper = document.querySelector('.paper');
   if (!paper) return;
@@ -695,6 +704,64 @@ window.addEventListener('blur', stopScroll);
   }, { passive: true });
 })();
 
+/* ---------- 点击左右边缘翻页：左边上一页，右边下一页 ---------- */
+async function turnPage(dir) {
+  if ($('#reader').hidden) return;
+  const paper = document.querySelector('.paper');
+  if (!paper || state.loading) return;
+  stopScroll();
+
+  // 图片书一页一屏，滚动没有意义，直接翻页
+  if (state.book && state.book.type === 'image') {
+    const n = state.ci + dir;
+    if (n >= 0 && n < state.toc.length) await loadChapter(n);
+    return;
+  }
+
+  const max = Math.max(0, paper.scrollHeight - paper.clientHeight);
+  const step = Math.max(80, Math.round(paper.clientHeight * 0.86));   // 留一成重叠，不丢行
+  const atTop = paper.scrollTop <= 2;
+  const atEnd = paper.scrollTop >= max - 2;
+
+  if (dir > 0) {
+    if (atEnd || max === 0) {                       // 到底了，翻下一章
+      if (state.ci < state.toc.length - 1) await loadChapter(state.ci + 1);
+      return;
+    }
+  } else if (atTop) {                               // 到顶了，翻上一章并落到末尾
+    if (state.ci > 0) {
+      await loadChapter(state.ci - 1, false);
+      const p = document.querySelector('.paper');
+      if (p) jumpTo(p.scrollHeight);
+    }
+    return;
+  }
+  paper.scrollTop = Math.max(0, Math.min(max, paper.scrollTop + dir * step));
+}
+
+(() => {
+  [[$('#flipPrev'), -1], [$('#flipNext'), 1]].forEach(([el, dir]) => {
+    if (!el) return;
+    let down = null;
+    el.addEventListener('pointerdown', e => {
+      down = (e.pointerType === 'mouse' && e.button !== 0)
+        ? null : { x: e.clientX, y: e.clientY, t: Date.now() };
+    });
+    el.addEventListener('pointerup', e => {
+      const d = down;
+      down = null;
+      if (!d) return;
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 12) return;  // 拖动 / 滑动，按误触忽略
+      if (Date.now() - d.t > 900) return;                             // 长按不翻
+      const s = window.getSelection();
+      if (s && !s.isCollapsed) return;                                // 正在选字，不翻
+      turnPage(dir);
+    });
+    el.addEventListener('pointercancel', () => { down = null; });
+    el.addEventListener('contextmenu', e => e.preventDefault());
+  });
+})();
+
 /* ---------- 启动 ---------- */
 async function loadShelf(hidden) {
   const h = hidden === undefined ? state.hidden : hidden;
@@ -734,7 +801,23 @@ const imp = {
   dragFrom: -1,    // 正在拖动的缩略图序号
   chain: 0,        // 混合提交时的剩余任务数
   lastId: '',      // 混合提交里最后一本书的 id
+  stageId: '',     // 覆盖更新的暂存会话；有值表示「新图已收在服务端，还没替换旧书」
+  stageTarget: '', // 这次覆盖的是哪本书
+  stageExpect: 0,  // 本次总共要传多少页
+  sent: 0,         // 已成功上传的页数（从 images 头部算起），续传时从这里切片
 };
+
+/* 手机浏览器（iOS Safari / Android Chrome）不实现 webkitdirectory，
+   点「整个文件夹」只会弹普通的文件选择，所以这个入口在手机上直接撤掉，
+   换成说明 + ZIP（压缩包里带目录，解压后仍能还原顺序）。 */
+const MOBILE = /Android|iPhone|iPad|iPod|Windows Phone|HarmonyOS/i.test(navigator.userAgent)
+  || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+if (MOBILE) {
+  const dw = $('#impDirWrap');
+  if (dw) dw.remove();              // 连同它前面的分隔符一起拿掉，避免出现「/ /」
+  const dh = $('#impDropHint');
+  if (dh) dh.textContent = '手机不能选整个文件夹：可多选图片，页序用下方排序调整；打包成 ZIP 上传可保留目录顺序';
+}
 
 function impMsg(text, kind) {
   const el = $('#impMsg');
@@ -753,11 +836,19 @@ function openImp() {
 
 function closeImp() {
   if (imp.busy) return;
+  // 更新做到一半就关窗，先把话说清楚：旧书没动，但已传的页会作废
+  if (imp.stageId) {
+    const n = imp.stageExpect || 0;
+    if (!confirm(`这次更新还没提交：新图已暂存 ${n} 页，旧书目前没有任何改动。\n\n` +
+      '关闭后需要重新上传才能完成更新。确定关闭？')) return;
+    dropStage();
+  }
   $('#impModal').hidden = true;
   imp.text = '';
   imp.mode = '';
   imp.resumeId = '';
   imp.chain = 0;
+  imp.sent = 0;
   clearImages();
   $('#impFile').value = '';
   $('#impDir').value = '';
@@ -816,7 +907,12 @@ function syncImp() {
   $('#impStage').hidden = n === 0;
   const ta = $('#impText');
   ta.hidden = n > 0;          // 有图时收起正文框，避免两块输入区互相干扰
-  $('#impGo').textContent = hasT && n ? '导入 2 本' : (n ? '上传并阅读' : '导入并阅读');
+  if (imp.stageId || imp.resumeId) {
+    $('#impGo').textContent = (imp.stageId && imp.stageExpect && imp.sent >= imp.stageExpect)
+      ? '再次提交' : '继续上传';
+  } else {
+    $('#impGo').textContent = hasT && n ? '导入 2 本' : (n ? '上传并阅读' : '导入并阅读');
+  }
   $('#impTitle').placeholder = (n && !hasT) ? '留空则自动命名' : '留空则用文件名';
 }
 
@@ -877,7 +973,7 @@ async function doImport(opts) {
       const name = d.title || payload.title || '同名书籍';
       const yes = confirm(
         `已存在同名书籍《${name}》${d.n ? '（' + d.n + ' 节）' : ''}。\n\n` +
-        '确定：用新内容更新它，章节标题与段落数对得上的旧译文会保留；\n' +
+        '确定：用新内容替换旧正文（不可撤销），章节标题与段落数对得上的旧译文会保留；\n' +
         '取消：另存为一本新书，旧书保持不动。'
       );
       imp.busy = false;
@@ -1018,7 +1114,11 @@ function dropImage(i) {
 }
 
 function takeImages(files, from) {
-  if (from !== 'paste') imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
+  if (from !== 'paste') {
+    imp.resumeId = '';   // 重新选图就从头算，避免和上次的半本混在一起
+    imp.sent = 0;
+    dropStage();         // 重新选图也表示放弃上次没提交的更新
+  }
   const arr = [...(files || [])].filter(f =>
     /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
   if (!arr.length) { impMsg('没有可用的图片（jpg / png / webp / gif）', 'err'); return; }
@@ -1047,13 +1147,128 @@ function takeImages(files, from) {
   impMsg(cut ? '单本上限 400 页，超出部分已忽略' : stageHint(), cut ? 'err' : 'ok');
 }
 
+/* ---------- ZIP：在浏览器里就地解压，之后与「选文件夹」走同一条流程 ---------- */
+const ZIP_MAX = 200 * 1024 * 1024;      // 压缩包上限（手机内存吃不消更大的）
+const mimeOf = n => /\.png$/i.test(n) ? 'image/png'
+  : /\.webp$/i.test(n) ? 'image/webp'
+    : /\.gif$/i.test(n) ? 'image/gif'
+      : /\.bmp$/i.test(n) ? 'image/bmp'
+        : /\.avif$/i.test(n) ? 'image/avif' : 'image/jpeg';
+
+/* 中文 ZIP 常用 GBK 且不置 UTF-8 标志位，先按 UTF-8 严格解，失败再退 GBK */
+function zipName(bytes) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { }
+  try { return new TextDecoder('gbk').decode(bytes); } catch (e) { }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+async function inflateRaw(bytes) {
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+/* 读中央目录取文件名 / 压缩方式 / 偏移，再按本地头定位数据段。
+   只认 store(0) 与 deflate(8)，这两种覆盖了 99% 的压缩包。 */
+async function unzipImages(file, onStep) {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('这个浏览器不支持在线解压，请解压后直接选图片，或在电脑上导入');
+  }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const u16 = o => dv.getUint16(o, true);
+  const u32 = o => dv.getUint32(o, true);
+
+  let eocd = -1;
+  for (let i = buf.length - 22, stop = Math.max(0, buf.length - 66000); i >= stop; i--) {
+    if (u32(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 ZIP 压缩包');
+
+  const count = u16(eocd + 10);
+  let off = u32(eocd + 16);
+  const out = [];
+  for (let n = 0; n < count; n++) {
+    if (off + 46 > buf.length || u32(off) !== 0x02014b50) break;
+    const method = u16(off + 10);
+    const csize = u32(off + 20);
+    const usize = u32(off + 24);
+    const nlen = u16(off + 28), elen = u16(off + 30), clen = u16(off + 32);
+    const lho = u32(off + 42);
+    const name = zipName(buf.subarray(off + 46, off + 46 + nlen)).replace(/\\/g, '/');
+    off += 46 + nlen + elen + clen;
+
+    if (!/\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(name)) continue;
+    if (name.startsWith('__MACOSX/') || /(^|\/)\./.test(name)) continue;   // 系统垃圾与隐藏文件
+    if (name.endsWith('/') || usize > 16 * 1024 * 1024) continue;
+    if (lho + 30 > buf.length || u32(lho) !== 0x04034b50) continue;
+
+    const start = lho + 30 + u16(lho + 26) + u16(lho + 28);
+    const comp = buf.subarray(start, start + csize);
+    let raw = null;
+    try {
+      if (method === 0) raw = comp;
+      else if (method === 8) raw = await inflateRaw(comp);
+    } catch (e) { raw = null; }
+    if (!raw) continue;
+
+    const base = name.split('/').pop();
+    const f = new File([raw], base, { type: mimeOf(base), lastModified: file.lastModified });
+    try { Object.defineProperty(f, 'relPath', { value: name, configurable: true }); } catch (e) { }
+    out.push(f);
+    if (onStep && out.length % 6 === 0) onStep(out.length);
+    if (out.length >= 400) break;        // 单本上限，后面的一定也装不下
+  }
+  return out;
+}
+
+async function takeZip(f) {
+  if (f.size > ZIP_MAX) {
+    impMsg(`压缩包 ${(f.size / 1048576).toFixed(0)} MB 超过 200 MB 上限，请分批打包`, 'err');
+    return;
+  }
+  imp.busy = true;
+  $('#impGo').disabled = true;
+  impMsg(`正在解压 ${f.name}…`);
+  try {
+    const files = await unzipImages(f, n => impMsg(`正在解压 ${f.name} · 已读出 ${n} 页…`));
+    if (!files.length) throw new Error('压缩包里没有可用的图片（jpg / png / webp / gif / bmp / avif）');
+    takeImages(files, 'zip');
+    if (!$('#impTitle').value.trim()) {
+      $('#impTitle').value = f.name.replace(/\.zip$/i, '').slice(0, 120);
+    }
+  } catch (e) {
+    impMsg(String(e.message || e), 'err');
+  } finally {
+    imp.busy = false;
+    $('#impGo').disabled = false;
+  }
+}
+
 /* 统一入口：拖进来 / 选进来的东西按类型分流，文本进正文、图片进暂存区 */
 async function takeFiles(files, opts) {
   opts = opts || {};
   const all = [...(files || [])];
-  const imgs = all.filter(f =>
+
+  // 压缩包单独处理：里面本来就是一整批图，和别的文件混着传没有意义
+  const zips = all.filter(f => /\.zip$/i.test(f.name) || /zip/i.test(f.type || ''));
+  if (zips.length) {
+    if (zips.length > 1) impMsg('一次只解压一个压缩包，已取第一个', '');
+    await takeZip(zips[0]);
+    const rest = all.length - zips.length;
+    if (rest > 0) {
+      const el = $('#impMsg');
+      el.textContent = (el.textContent ? el.textContent + ' · ' : '') + `另有 ${rest} 个文件未处理，压缩包请单独上传`;
+    }
+    return;
+  }
+
+  // HEIC 浏览器解不了，服务端也没装解码器：先摘出来单独提示，别让它混进图片再失败
+  const heic = all.filter(f => /\.(heic|heif)$/i.test(f.name));
+  const rest = all.filter(f => !heic.includes(f));
+
+  const imgs = rest.filter(f =>
     /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name));
-  const txts = all.filter(f =>
+  const txts = rest.filter(f =>
     !imgs.includes(f) && (/^text\//.test(f.type) || /\.(txt|md|text)$/i.test(f.name)));
 
   if (txts.length) {
@@ -1064,11 +1279,17 @@ async function takeFiles(files, opts) {
 
   if (imgs.length) takeImages(imgs, opts.from);
 
-  const other = all.length - imgs.length - txts.length;
+  const other = all.length - imgs.length - txts.length - heic.length;
   if (!imgs.length && !txts.length) {
-    impMsg(other ? '只能导入 .txt / .md 文本或图片' : '没有可导入的文件', 'err');
-  } else if (other > 0 && !imp.text) {
-    impMsg(`已忽略 ${other} 个不支持的文件`, '');
+    if (heic.length) impMsg(`${heic.length} 张 HEIC / HEIF 照片浏览器无法解码，请在相册里导出为 JPEG 后再传`, 'err');
+    else impMsg(other ? '只能导入 .txt / .md 文本、图片，或图片打包成的 .zip' : '没有可导入的文件', 'err');
+  } else {
+    if (other > 0 && !imp.text) impMsg(`已忽略 ${other} 个不支持的文件`, '');
+    if (heic.length) {
+      const tip = `另有 ${heic.length} 张 HEIC 未导入，请先导出为 JPEG`;
+      const el = $('#impMsg');
+      el.textContent = (el.textContent ? el.textContent + ' · ' : '') + tip;
+    }
   }
 }
 
@@ -1111,13 +1332,18 @@ async function filesFromDrop(dt) {
 }
 
 /* 带上传进度的 POST；fetch 拿不到上传进度，所以这里用 XHR */
-function xhrUpload(url, fd, onProgress) {
+function xhrUpload(url, fd, onProgress, opt) {
+  opt = opt || {};
+  const timeout = opt.timeout || 240000;
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open('POST', url);
-    x.upload.onprogress = ev => {
-      if (ev.lengthComputable) onProgress(Math.round(ev.loaded / ev.total * 100));
-    };
+    x.timeout = timeout;
+    if (onProgress) {
+      x.upload.onprogress = ev => {
+        if (ev.lengthComputable) onProgress(Math.round(ev.loaded / ev.total * 100));
+      };
+    }
     x.onload = () => {
       let j = {};
       try { j = JSON.parse(x.responseText || '{}'); } catch (e) { }
@@ -1129,86 +1355,225 @@ function xhrUpload(url, fd, onProgress) {
       err.body = j;
       reject(err);
     };
-    x.onerror = () => reject(new Error('网络中断，请重试'));
+    x.onerror = () => reject(new Error('网络中断，请检查连接'));
+    x.ontimeout = () => {
+      const e = new Error(`超过 ${Math.round(timeout / 1000)} 秒没有回应`);
+      e.timeout = true;
+      reject(e);
+    };
     x.send(fd);
   });
+}
+
+/* 同一批用同一个幂等令牌重试：服务端若已收下会直接回放结果，不会重复写页 */
+async function uploadRetry(url, fd, onProgress, tries) {
+  tries = tries || 3;
+  let last;
+  for (let k = 0; k < tries; k++) {
+    try {
+      return await xhrUpload(url, fd, onProgress);
+    } catch (e) {
+      last = e;
+      const retriable = !e.status || e.status >= 500;   // 4xx 是内容问题，重试没意义
+      if (!retriable || k === tries - 1) throw e;
+      impMsg(`${e.message || e}，第 ${k + 1} 次重试…`);
+      await new Promise(r => setTimeout(r, 900 * Math.pow(2, k)));
+    }
+  }
+  throw last;
+}
+
+/* 丢弃未提交的暂存会话（服务端 24 小时也会自动回收，这里主动清一次） */
+function dropStage() {
+  if (!imp.stageId) return;
+  const sid = imp.stageId;
+  imp.stageId = '';
+  imp.stageTarget = '';
+  imp.stageExpect = 0;
+  fetch('/api/import/images/stage/' + encodeURIComponent(sid), { method: 'DELETE' }).catch(() => { });
+}
+
+/* 提交中断后判断到底成没成：会话还在=没提交，会话没了且页数对得上=已经提交 */
+async function stageVerdict(sid, target, total) {
+  try {
+    const r = await fetch('/api/import/images/stage/' + encodeURIComponent(sid));
+    if (r.ok) return 'pending';
+    if (r.status !== 404) return 'unknown';
+  } catch (e) {
+    return 'unknown';
+  }
+  try {
+    const b = await fetch('/api/book/' + encodeURIComponent(target || sid)).then(x => x.json());
+    const got = (b.toc || []).length;
+    if (b.type === 'image' && got && (!total || got === total)) return 'committed';
+  } catch (e) { }
+  return 'unknown';
+}
+
+async function imageDone(id) {
+  imp.busy = false;
+  $('#impGo').disabled = false;
+  imp.stageId = '';
+  imp.stageTarget = '';
+  imp.stageExpect = 0;
+  imp.resumeId = '';
+  imp.sent = 0;
+  if (await finishTask(id)) {
+    await loadShelf(state.hidden);
+    openBook(id, false);
+  }
 }
 
 async function doImportImages(opts) {
   if (imp.busy) return;
   opts = opts || {};
-  const files = imp.images;
-  if (!files.length) { impMsg('请先选择图片', 'err'); return; }
+  const resuming = !!(imp.stageId || imp.resumeId);
+  const files = resuming ? imp.images.slice(imp.sent || 0) : imp.images;
+  if (!files.length && !imp.stageId) { impMsg('请先选择图片', 'err'); return; }
   // 混合提交时图片书不跟文字书抢同一个名字，留空让服务端自动命名
   const title = opts.titleOverride !== undefined ? opts.titleOverride : $('#impTitle').value.trim();
+  const cover = opts.replace || imp.stageTarget || '';   // 要覆盖的书号，空=新建
+  const total = imp.stageExpect || imp.images.length;    // 续传时沿用最初的总页数
 
   imp.busy = true;
   $('#impGo').disabled = true;
+  if (cover && !imp.stageExpect) imp.stageExpect = total;
+
   const BATCH = 24;          // 每批 24 张，几百页也不会把网关拖到超时
-  let id = imp.resumeId || '';   // 上次中断时就接着往这本书里补
+  const runId = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const base = imp.sent || 0;   // 续传起点：前面这些页服务端已经收下了
+  let sid = imp.stageId || '';
+  let id = imp.resumeId || '';   // 普通书上传中断时接着往这本书里补
   let added = 0;
   let skipped = 0;
-  let sent = 0;
+  let sent = base;
+  let phase = 'upload';
 
   try {
     for (let i = 0; i < files.length; i += BATCH) {
       const chunk = files.slice(i, i + BATCH);
       const fd = new FormData();
       chunk.forEach(f => fd.append('files', f, f.name));
-      if (!id) {
+      fd.append('batch', `${runId}-${i}`);   // 幂等：同一批重试不会写两遍
+
+      if (sid) {
+        fd.append('append', sid);
+      } else if (id) {
+        fd.append('append', id);
+      } else if (cover) {
+        fd.append('stage', '1');
+        fd.append('target', cover);
+        fd.append('expect', String(total));
+        fd.append('title', title);
+        fd.append('author', $('#impAuthor').value.trim());
+        // 分类与可见性不传：更新图片不该顺手改这两项，服务端沿用旧书的值
+      } else {
         fd.append('title', title);
         fd.append('author', $('#impAuthor').value.trim());
         fd.append('cat', $('#impCat').value);
         if ($('#impHidden').checked) fd.append('hidden', '1');
-        if (opts.replace) fd.append('replace', opts.replace);
         if (opts.duplicate) fd.append('allow_duplicate', '1');
-      } else {
-        fd.append('append', id);
       }
 
-      const range = `${i + 1}–${i + chunk.length}`;
-      impMsg(`正在处理第 ${range} 页 / 共 ${files.length} 页…`);
-      const j = await xhrUpload('/api/import/images', fd, pct => {
-        impMsg(`正在上传第 ${range} 页 / 共 ${files.length} 页 · ${pct}%`);
-      });
-      id = j.id || id;
+      const a = base + i + 1, b = base + i + chunk.length;
+      const range = `${a}–${b}`;
+      const head = cover ? '正在上传新图' : '正在处理';
+      impMsg(`${head} 第 ${range} 页 / 共 ${total} 页…`);
+      const j = await uploadRetry('/api/import/images', fd, pct => {
+        impMsg(`${head} 第 ${range} 页 / 共 ${total} 页 · ${pct}%`);
+      }, 3);
+
+      if (j.staging) {
+        sid = j.staging;
+        imp.stageId = sid;
+        imp.stageTarget = j.target || cover;
+      } else if (j.id) {
+        id = j.id;
+      }
       added += j.added || 0;
       skipped += j.skipped || 0;
-      sent += chunk.length;
+      sent = b;
+      imp.sent = sent;          // 实时记进度，中断后从这里续
     }
 
-    imp.resumeId = '';
-    if (await finishTask(id)) {
-      await loadShelf(state.hidden);
-      openBook(id, false);
+    let finalId = id;
+    if (sid) {
+      // 覆盖更新：所有页都收齐了，才让服务端校验并原子替换
+      phase = 'commit';
+      impMsg(`已收到 ${added} 页，正在校验页数并替换…`);
+      const cfd = new FormData();
+      cfd.append('stage', sid);
+      cfd.append('target', imp.stageTarget || cover);
+      const c = await uploadRetry('/api/import/images/commit', cfd, null, 3);
+      finalId = c.id || imp.stageTarget;
+      const back = await fetch('/api/book/' + encodeURIComponent(finalId)).then(r => r.json());
+      const got = (back.toc || []).length;
+      if (back.type !== 'image') throw new Error('替换后不是图片书，已中止');
+      if (total && got !== total) throw new Error(`替换后只有 ${got} 页，应为 ${total} 页`);
     }
+
+    return await imageDone(finalId);
   } catch (e) {
-    if (e.status === 409 && !opts.replace && !opts.duplicate) {
-      const d = (e.body && e.body.detail && e.body.detail.conflict) || {};
-      const yes = confirm(
-        `已存在同名书籍《${d.title || title}》${d.n ? '（' + d.n + ' 页/节）' : ''}。\n\n` +
-        '确定：用这批图片覆盖它，旧页会被清空；\n' +
-        '取消：另存为一本新书。'
-      );
-      imp.busy = false;
-      $('#impGo').disabled = false;
-      if (yes) await doImportImages({ replace: d.id || '' });
-      else await doImportImages({ duplicate: true });
-      return;
-    }
     imp.busy = false;
     $('#impGo').disabled = false;
     imp.chain = 0;
     const extra = skipped ? `（${skipped} 页被跳过）` : '';
+    const detail = (e.body && e.body.detail) || {};
 
-    // 已经建好书、只是后面几批失败：记住断点，下次只补剩下的页，避免重复
-    if (id && sent < files.length) {
-      imp.resumeId = id;
-      imp.images = files.slice(sent);
-      renderImages();
+    // 同名冲突：问要不要覆盖
+    if (e.status === 409 && detail.conflict && !cover && !opts.duplicate) {
+      const d = detail.conflict;
+      const multi = (d.count || 1) > 1
+        ? `\n（书库里有 ${d.count} 本同名书，将更新其中最近导入的一本）` : '';
+      const yes = confirm(
+        `已存在同名书籍《${d.title || title}》${d.n ? '（' + d.n + ' 页/节）' : ''}。${multi}\n\n` +
+        '确定：用这批图片替换它（新图全部收齐并校验通过后才替换，失败则旧内容不变；替换后不可回退）；\n' +
+        '取消：另存为一本新书。'
+      );
+      if (yes) await doImportImages({ replace: d.id || '' });
+      else await doImportImages({ duplicate: true });
+      return;
+    }
+
+    // 提交阶段出错：先探明服务端到底提交成功没有，别把成功报成失败
+    if (phase === 'commit' && sid) {
+      const v = await stageVerdict(sid, imp.stageTarget || cover, total);
+      if (v === 'committed') {
+        impMsg('更新已完成（提交回执丢失，但已核实页数一致）', 'ok');
+        return await imageDone(imp.stageTarget || cover);
+      }
+      if (v === 'pending') {
+        $('#impGo').textContent = '再次提交';
+        impMsg(`旧书未做任何改动。新图已在服务端就绪（${total} 页），但替换这一步没走完：` +
+               `${e.message || e}。点「再次提交」重试，不需要重新上传。`, 'err');
+        return;
+      }
+      dropStage();
+      impMsg(`旧书未做任何改动，但无法确认替换结果：${e.message || e}。请打开这本书核对，必要时重新导入。`, 'err');
+      return;
+    }
+
+    // 上传中途失败：旧书没动，已收的页留在服务端，接着传就行
+    if (sid && sent < total) {
       $('#impGo').textContent = '继续上传';
-      impMsg(`已传 ${sent} / ${files.length} 页，后面失败了：${e.message || e}${extra}。` +
-             `点「继续上传」只补剩下的 ${files.length - sent} 页。`, 'err');
+      impMsg(`旧书未做任何改动。已暂存 ${sent} / ${total} 页，传输中断：${e.message || e}${extra}。` +
+             `点「继续上传」只补剩下的 ${total - sent} 页。`, 'err');
+      return;
+    }
+
+    if (sid) {
+      dropStage();
+      $('#impGo').textContent = '重新导入';
+      impMsg(`旧书未做任何改动。${e.message || e}${extra}。请检查这批图片后重新导入。`, 'err');
+      return;
+    }
+
+    // 普通新建/追加：已经建好书、只是后面几批失败，记住断点只补剩余页
+    if (id && sent < total) {
+      imp.resumeId = id;
+      $('#impGo').textContent = '继续上传';
+      impMsg(`已传 ${sent} / ${total} 页，后面失败了：${e.message || e}${extra}。` +
+             `点「继续上传」只补剩下的 ${total - sent} 页。`, 'err');
       return;
     }
     impMsg(String(e.message || e) + extra, 'err');
@@ -1220,9 +1585,16 @@ $('#impDrop').addEventListener('click', () => $('#impFile').click());
 $('#impDrop').addEventListener('keydown', e => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#impFile').click(); }
 });
-$('#impPickDir').addEventListener('click', e => {
-  e.stopPropagation();            // 别同时弹出「选文件」
-  $('#impDir').click();
+const pdEl = $('#impPickDir');
+if (pdEl) {
+  pdEl.addEventListener('click', e => {
+    e.stopPropagation();          // 别同时弹出「选文件」
+    $('#impDir').click();
+  });
+}
+$('#impPickZip').addEventListener('click', e => {
+  e.stopPropagation();
+  $('#impFile').click();
 });
 
 $('#impFile').addEventListener('change', e => {
@@ -1298,6 +1670,9 @@ if (window.matchMedia('(hover:none)').matches) {
 async function delBook() {
   const b = state.book;
   if (!b) return;
+  const ok = confirm('把《' + b.title + '》彻底删除？\n\n' +
+    '正文、图片页、译文缓存和目录译名都会立即清除，无法恢复。');
+  if (!ok) return;
   const token = prompt('删除《' + b.title + '》需要管理口令（服务端 ADMIN_TOKEN）：');
   if (token == null) return;
   const r = await fetch('/api/book/' + b.id, {
@@ -1305,7 +1680,11 @@ async function delBook() {
     headers: { 'X-Admin-Token': token },
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert(j.detail || ('删除失败 ' + r.status)); return; }
+  if (!r.ok) {
+    const d = j.detail;
+    alert(typeof d === 'string' ? d : ('删除失败 ' + r.status));
+    return;
+  }
   closeReader();
   await loadShelf(state.hidden);
 }
