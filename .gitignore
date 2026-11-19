@@ -5,3 +5,4 @@ data/users/
 *.tmp
 data/staging/
 data/batches.json
+data/uploads/

@@ -1,6 +1,19 @@
 const $ = (s) => document.querySelector(s);
 const api = (p) => fetch(p).then((r) => r.ok ? r.json() : Promise.reject(r.status));
 
+// POST JSON，错误把服务端的 detail 抬成异常消息，前端直接能显示
+const postJSON = (p, body) => fetch(p, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body || {}),
+}).then(async (r) => {
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = j.detail;
+    throw new Error((d && (d.msg || d)) || ('请求失败 ' + r.status));
+  }
+  return j;
+});
+
 /* 作者名：拼音 -> 中文（只做确定映射，其余按规则归一） */
 const AUTHORS = {
   'Guanzhong Luo': '罗贯中', 'Xueqin Cao': '曹雪芹', "Cheng'en Wu": '吴承恩',
@@ -37,6 +50,8 @@ const state = {
   book: null, toc: [], ci: 0, loading: false, cn: 'en', ch: null,
   tr: false, tx: null, stopped: null,
   hidden: false,
+  sel: null,      // null = 普通浏览；Set = 多选模式（存选中的书号）
+  view: [],       // 当前筛选排序后的可见列表，全选只作用于这一批
 };
 
 function fmtChars(n) {
@@ -45,8 +60,25 @@ function fmtChars(n) {
 }
 const UNIT = { '回': '回', '章': '章', '卷': '卷', '篇': '篇', '节': '节', '单': '节' };
 
+const VIDEO_EXT = /\.(mp4|m4v|webm|ogv|mov|mkv|avi|ts|flv)$/i;
+// 时长：不到一小时只显示分:秒，超过就带小时
+function fmtDur(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+    : `${m}:${String(ss).padStart(2, '0')}`;
+}
+function fmtBytes(n) {
+  if (!n) return '0';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, x = n;
+  while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
+  return (i < 2 ? Math.round(x) : x.toFixed(1)) + ' ' + u[i];
+}
+
 function bookSize(b) {
   if (b.type === 'image') return b.n + ' 页';
+  if (b.type === 'video') return b.n > 1 ? b.n + ' 集' : fmtDur(b.dur);
   if (b.lang === 'en') {
     const w = b.words || Math.round(b.chars / 5.6);
     return w >= 10000 ? (w / 10000).toFixed(w >= 100000 ? 0 : 1) + ' 万词' : w + ' 词';
@@ -67,17 +99,25 @@ function render() {
     : s === 'author' ? authorName(a.author).localeCompare(authorName(b.author), 'zh')
     : (b.w || b.chars) - (a.w || a.chars));
 
-  $('#grid').innerHTML = items.map(b => `
-    <button class="card" data-id="${b.id}">
+  $('#grid').innerHTML = items.map(b => {
+    const on = !!(state.sel && state.sel.has(b.id));
+    return `
+    <button class="card${on ? ' picked' : ''}" data-id="${b.id}">
+      ${state.sel ? `<span class="pick">${on ? '✓' : ''}</span>` : ''}
       ${b.ok ? '' : '<span class="badge">残本</span>'}
       ${b.has_cn ? `<span class="cn">${b.lang === 'zh' ? '白' : '译'}</span>` : ''}
       ${b.lang === 'en' ? '<span class="en">EN</span>' : ''}
       ${b.type === 'image' ? '<span class="comic">漫</span>' : ''}
+      ${b.type === 'video' ? '<span class="comic vid">影</span>' : ''}
       <div class="t">${esc(b.title)}</div>
       <div class="a">${esc(authorName(b.author))}</div>
-      <div class="s">${b.source === 'user' ? '<span class="imp">导入</span> · ' : ''}<span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${b.type === 'image' ? `${b.n} 页` : `${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}`}</div>
-    </button>`).join('');
+      <div class="s">${b.source === 'user' ? '<span class="imp">导入</span> · ' : ''}<span class="c">${esc(b.cat)}</span>${b.has_cn ? `<span class="hascn">${b.lang === 'zh' ? '有白话' : '有译本'}</span> · ` : ''}${b.type === 'image' ? `${b.n} 页` : b.type === 'video'
+        ? (b.n > 1 ? `${b.n} 集 · ${fmtBytes(b.size)}` : `${fmtDur(b.dur)} · ${fmtBytes(b.size)}`)
+        : `${bookSize(b)} · ${b.n} ${UNIT[b.kind] || '节'}`}</div>
+    </button>`;
+  }).join('');
 
+  state.view = items;
   $('#count').textContent = `${items.length} 本`;
   $('#empty').hidden = items.length > 0;
 }
@@ -103,6 +143,10 @@ const mem = {
   recent: [],
   pos: {},
   cn: {},
+  token: '',       // 本次会话用过的删除口令，避免每本都重输
+  vpos: {},        // 视频看到哪儿了（会话内，刷新即忘）
+  rate: 1,         // 视频倍速，全站沿用
+  muted: false,    // 视频静音，换集/换书沿用
 };
 
 /* 清掉旧版本留在浏览器里的键（旧版本用 md: 前缀存过设备号与进度） */
@@ -145,13 +189,20 @@ async function openBook(id, resume = true) {
     $('#delBtn').hidden = false;   // 内置书与导入书都能删，口令在点击后校验
     const isEn = meta.lang === 'en';
     const isImg = meta.type === 'image';
+    const isVid = meta.type === 'video';
     $('#text').classList.toggle('imgs', isImg);
+    $('#text').classList.toggle('vids', isVid);
     $('.paper').classList.toggle('imgmode', isImg);
-    $('#fontMinus').hidden = isImg;
-    $('#fontPlus').hidden = isImg;
+    $('.paper').classList.toggle('vidmode', isVid);
+    $('#fontMinus').hidden = isImg || isVid;
+    $('#fontPlus').hidden = isImg || isVid;
+    $('#prevCh').textContent = isVid ? '← 上一集' : '← 上一回';
+    $('#nextCh').textContent = isVid ? '下一集 →' : '下一回 →';
     let tag = '';
     if (isImg) {
       tag = ` · 漫画 · ${meta.toc.length} 页`;
+    } else if (isVid) {
+      tag = ` · 视频 · ${meta.toc.length} 集 · ${fmtBytes(meta.size)}`;
     } else if (isEn) {
       tag = meta.has_cn ? ' · 英文原著（含中译）'
         : (meta.translate ? ' · 英文原著 · 可实时翻译' : ' · 英文原著');
@@ -202,6 +253,12 @@ function markToc() {
 
 async function loadChapter(idx, scrollTop = true) {
   stopScroll();
+  // 换集之前先把这一集看到哪儿存下来，回来还能接上
+  if (state.book && state.book.type === 'video') {
+    vcancelHold();                 // 正在按住快放就取消，别把 2× 带到下一集
+    const pv = mvid();
+    if (pv) mem.vpos[state.book.id + ':' + state.ci] = pv.currentTime || 0;
+  }
   if (state.loading) return;
   if (state.tx && state.tx.ctrl) { try { state.tx.ctrl.abort(); } catch (e) { } }
   state.tx = null;
@@ -235,6 +292,50 @@ function renderChapter() {
   const c = state.ch;
   if (!c) return;
   const ta = $('#text');
+
+  if (state.book && state.book.type === 'video') {
+    $('#ctitle').textContent = c.title;
+    $('#txbar').hidden = true;
+    const bid = state.book.id;
+    const src = '/media/' + bid + '/' + encodeURIComponent(c.file || '');
+    const poster = state.book.has_poster ? `/media/${bid}/poster.jpg` : '';
+    ta.innerHTML = c.file
+      ? `<div class="mvwrap" id="mvwrap">
+           <div class="mvbox">
+             <video class="mv" id="mv" controls playsinline preload="metadata"
+               ${poster ? `poster="${poster}"` : ''} src="${src}"></video>
+             <div class="mvtoast" id="mvToast"></div>
+           </div>
+           <div class="mvbar">
+             <div class="mvgrp">
+               <button class="mb" type="button" data-sk="-30" title="后退 30 秒（Shift + ←）">−30s</button>
+               <button class="mb" type="button" data-sk="-10" title="后退 10 秒（J 或 ←）">−10s</button>
+               <button class="mb pp" type="button" data-pp title="播放 / 暂停（K 或空格）">▶</button>
+               <button class="mb" type="button" data-sk="10" title="前进 10 秒（L 或 →）">+10s</button>
+               <button class="mb" type="button" data-sk="30" title="前进 30 秒（Shift + →）">+30s</button>
+             </div>
+             <div class="mvgrp">
+               <button class="mb ic${mem.muted ? ' off' : ''}" type="button" data-mute
+                 title="声音开关（M）" aria-label="声音开关">
+                 <svg viewBox="0 0 24 24" aria-hidden="true">
+                   <path d="M4 9.5h3.4L12 5.8v12.4L7.4 14.5H4z"/>
+                   <path class="wv" d="M15.3 9.1a4.2 4.2 0 010 5.8"/>
+                   <path class="wv" d="M17.8 6.6a7.6 7.6 0 010 10.8"/>
+                   <path class="sl" d="M5 5l14 14"/>
+                 </svg>
+               </button>
+               <button class="mb" type="button" data-rate title="切换倍速：点一下升一档，到 3× 再点回到原速（键盘 [ / ] 升降）">${mem.rate}×</button>
+               <button class="mb" type="button" data-fs title="全屏（F）">⛶</button>
+             </div>
+           </div>
+           <p class="mvmeta"><span id="mvClock">0:00 / ${fmtDur(c.dur)}</span>
+             ${c.w ? ` · ${c.w}×${c.h}` : ''} · ${fmtBytes(c.size)}
+             ${state.toc.length > 1 ? ` · 第 ${state.ci + 1} / ${state.toc.length} 集` : ''}</p>
+         </div>`
+      : '<p class="loading">这个视频文件缺失</p>';
+    if (c.file) bindVideo();
+    return;
+  }
 
   if (state.book && state.book.type === 'image') {
     $('#ctitle').textContent = c.title;
@@ -547,7 +648,9 @@ $('#sort').addEventListener('click', e => {
 });
 $('#grid').addEventListener('click', e => {
   const c = e.target.closest('.card');
-  if (c) openBook(c.dataset.id);
+  if (!c) return;
+  if (state.sel) { togglePick(c.dataset.id); return; }
+  openBook(c.dataset.id);
 });
 $('#recentList').addEventListener('click', e => {
   const c = e.target.closest('.rc');
@@ -643,6 +746,12 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault(); $('#q').focus(); return;
   }
+  // ⌘/Ctrl + A：多选模式下全选当前筛选结果（否则保留浏览器原生全选）
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' && state.sel) {
+    state.view.forEach(b => state.sel.add(b.id));
+    render(); selInfo();
+    e.preventDefault(); return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   // 导入弹窗打开时，Esc 直接关掉（输入框里也生效）
@@ -650,6 +759,9 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeImp(); e.preventDefault(); }
     return;
   }
+
+  // 多选模式：Esc 退出
+  if (state.sel && e.key === 'Escape') { selMode(false); e.preventDefault(); return; }
 
   const el = e.target;
   const typing = !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
@@ -665,9 +777,59 @@ document.addEventListener('keydown', e => {
     if (n >= 0 && n < state.toc.length) { loadChapter(n); e.preventDefault(); }
   };
 
+  /* 视频：整套键盘遥控。方向键轻点跳 10 秒、按住 2 倍速快放，Shift 跳 30 秒，J/L 固定 10 秒 */
+  if (state.book && state.book.type === 'video' && mvid()) {
+    const step = e.shiftKey ? 30 : 10;
+    // 长按会连续发 keydown，只认第一次
+    if (e.repeat && (e.code === 'ArrowLeft' || e.code === 'ArrowRight'
+      || e.code === 'KeyA' || e.code === 'KeyD')) {
+      e.preventDefault();
+      return;
+    }
+    switch (e.code) {
+      case 'ArrowLeft': case 'KeyA': vpress(-1, step); break;
+      case 'ArrowRight': case 'KeyD': vpress(1, step); break;
+      case 'ArrowUp': case 'KeyW': vseek(-5); break;
+      case 'ArrowDown': case 'KeyS': vseek(5); break;
+      case 'KeyJ': vseek(-10); break;
+      case 'KeyL': vseek(10); break;
+      case 'KeyK': case 'Space': vtoggle(); break;
+      case 'Comma': vseek(-1 / 30); break;
+      case 'Period': vseek(1 / 30); break;
+      case 'BracketLeft': vrate(-1); break;
+      case 'BracketRight': vrate(1); break;
+      case 'KeyF': vfull(); break;
+      case 'KeyM': vmute(); break;
+      case 'Home': mvid().currentTime = 0; vtoast('回到开头'); break;
+      case 'End': {
+        const v = mvid();
+        if (isFinite(v.duration)) { v.currentTime = Math.max(0, v.duration - 0.4); vtoast('跳到结尾'); }
+        break;
+      }
+      case 'KeyP': if (state.ci > 0) loadChapter(state.ci - 1); break;
+      case 'KeyN': if (state.ci < state.toc.length - 1) loadChapter(state.ci + 1); break;
+      case 'Escape':
+        if (document.fullscreenElement) { document.exitFullscreen(); break; }  // 先退全屏，别把阅读器一起关掉
+        closeReader();
+        return;
+      default: {
+        const m = /^Digit([0-9])$/.exec(e.code);
+        if (m) {
+          const v = mvid();
+          const p = +m[1] / 10;
+          if (isFinite(v.duration)) { v.currentTime = v.duration * p; vtoast(Math.round(p * 100) + '%'); }
+        } else return;
+      }
+    }
+    e.preventDefault();
+    return;
+  }
+
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp': held.up = true; scrollStart(-1); e.preventDefault(); break;
-    case 'KeyS': case 'ArrowDown': held.down = true; scrollStart(1); e.preventDefault(); break;
+    case 'KeyW': case 'ArrowUp':
+      held.up = true; scrollStart(-1); e.preventDefault(); break;
+    case 'KeyS': case 'ArrowDown':
+      held.down = true; scrollStart(1); e.preventDefault(); break;
     case 'KeyA': case 'ArrowLeft': ch(-1); break;
     case 'KeyD': case 'ArrowRight': ch(1); break;
     case 'Escape': closeReader(); break;
@@ -678,8 +840,14 @@ document.addEventListener('keydown', e => {
 document.addEventListener('keyup', e => {
   if (e.code === 'KeyW' || e.code === 'ArrowUp') held.up = false;
   if (e.code === 'KeyS' || e.code === 'ArrowDown') held.down = false;
+  // 视频：松开 A/D/←/→ 才结算——按够久就只是复位快放，轻点才跳进度
+  const dirOf = { ArrowLeft: -1, KeyA: -1, ArrowRight: 1, KeyD: 1 };
+  if (vhold.dir && (dirOf[e.code] === vhold.dir || vhold.fired && dirOf[e.code])) {
+    vrelease();
+    e.preventDefault();
+  }
 });
-window.addEventListener('blur', stopScroll);
+window.addEventListener('blur', () => { stopScroll(); vcancelHold(); });
 
 /* ---------- 触屏：左右轻扫切换章节 ---------- */
 (() => {
@@ -693,6 +861,7 @@ window.addEventListener('blur', stopScroll);
     st = Date.now();
   }, { passive: true });
   paper.addEventListener('touchend', e => {
+    if (state.book && state.book.type === 'video') return;   // 进度条拖动别被当成切集
     const t = e.changedTouches[0];
     if (!t || Date.now() - st > 700) return;
     const sel = window.getSelection();
@@ -704,9 +873,225 @@ window.addEventListener('blur', stopScroll);
   }, { passive: true });
 })();
 
+/* ---------- 视频播放：快进 / 回退 / 倍速 / 全屏 / 连播 ---------- */
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+let vtTimer = 0;
+
+function vtoast(msg) {
+  const t = $('#mvToast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(vtTimer);
+  vtTimer = setTimeout(() => t.classList.remove('on'), 900);
+}
+
+const mvid = () => $('#mv');
+
+/* 相对跳转：秒。逐帧时传 1/30 */
+function vseek(d) {
+  const v = mvid();
+  if (!v || !isFinite(v.duration)) return;
+  v.currentTime = Math.max(0, Math.min(Math.max(0, v.duration - 0.05), v.currentTime + d));
+  if (!d) return;
+  if (Math.abs(d) >= 1) vtoast((d > 0 ? '快进 ' : '回退 ') + Math.round(Math.abs(d)) + ' 秒');
+  else vtoast(d > 0 ? '下一帧' : '上一帧');
+}
+
+function vtoggle() {
+  const v = mvid();
+  if (!v) return;
+  if (v.paused) v.play().catch(() => { });
+  else v.pause();
+}
+
+function vrate(dir, wrap) {
+  const v = mvid();
+  if (!v) return;
+  let i = RATES.indexOf(mem.rate);
+  if (i < 0) i = RATES.indexOf(1);
+  i += dir;
+  if (wrap) {
+    // 点按钮是一路升档，到顶就绕回原速——否则到了 3× 就再也点不回去
+    if (i >= RATES.length) i = RATES.indexOf(1);
+    if (i < 0) i = RATES.length - 1;
+  }
+  i = Math.max(0, Math.min(RATES.length - 1, i));
+  mem.rate = RATES[i];
+  v.playbackRate = mem.rate;
+  const b = $('.mvbar [data-rate]');
+  if (b) b.textContent = mem.rate + '×';
+  vtoast(mem.rate === 1 ? '原速' : '倍速 ' + mem.rate + '×');
+}
+
+function vfull() {
+  const v = mvid();
+  if (!v) return;
+  if (document.fullscreenElement) { document.exitFullscreen(); return; }
+  const box = $('.mvwrap') || v;
+  if (box.requestFullscreen) box.requestFullscreen().catch(() => { });
+  else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();      // iOS 只认 video 自己的全屏
+  else if (box.webkitRequestFullscreen) box.webkitRequestFullscreen();
+}
+
+/* 按住 A/D/←/→：不是一路快进，而是就地 2 倍速播放；轻点（不到 350ms）才算跳进度 */
+const HOLD_MS = 350;
+const vhold = { dir: 0, step: 10, timer: 0, fired: false, rate: 1, wasPaused: false };
+
+function vpress(dir, step) {
+  const v = mvid();
+  if (!v) return;
+  clearTimeout(vhold.timer);
+  vhold.dir = dir;
+  vhold.step = step;
+  vhold.fired = false;
+  vhold.rate = mem.rate;
+  vhold.wasPaused = v.paused;
+  vhold.timer = setTimeout(() => {
+    const vv = mvid();
+    if (!vv || !vhold.dir) return;
+    vhold.fired = true;
+    // 在当前倍速上再翻一倍，最少 2×、最多 4×（1× 按住就是 2×）
+    const fast = Math.min(4, Math.max(2, vhold.rate * 2));
+    vv.playbackRate = fast;
+    if (vv.paused) vv.play().catch(() => { });
+    vtoast('快放 ' + String(fast).replace(/\.0$/, '') + '×　松开恢复');
+  }, HOLD_MS);
+}
+
+function vrelease() {
+  clearTimeout(vhold.timer);
+  const dir = vhold.dir, step = vhold.step;
+  vhold.dir = 0;
+  const v = mvid();
+  if (!v) return;
+  if (vhold.fired) {
+    vhold.fired = false;
+    v.playbackRate = mem.rate;
+    if (vhold.wasPaused) { v.pause(); vtoast('已暂停'); }
+    else vtoast('恢复 ' + mem.rate + '×');
+    return;
+  }
+  if (dir) vseek(dir * step);      // 轻点：跳 10 秒（按住 Shift 是 30 秒）
+}
+
+function vcancelHold() {
+  clearTimeout(vhold.timer);
+  vhold.dir = 0;
+  vhold.fired = false;
+  const v = mvid();
+  if (v) v.playbackRate = mem.rate;
+}
+
+/* 静音开关：按钮与 M 键共用，切集后保持 */
+function vmute(m) {
+  const v = mvid();
+  if (!v) return;
+  v.muted = (m === undefined) ? !v.muted : !!m;
+  mem.muted = v.muted;
+  const b = $('.mvbar [data-mute]');
+  if (b) b.classList.toggle('off', v.muted);
+  vtoast(v.muted ? '已静音' : '声音已开');
+}
+
+function bindVideo() {
+  const v = mvid(), wrap = $('.mvwrap');
+  if (!v || !wrap) return;
+  const key = () => state.book.id + ':' + state.ci;
+
+  const clock = () => {
+    const el = $('#mvClock');
+    if (!el) return;
+    const total = isFinite(v.duration) && v.duration ? v.duration
+      : ((state.ch && state.ch.dur) || 0);
+    el.textContent = fmtDur(v.currentTime) + ' / ' + fmtDur(total);
+  };
+  const syncPP = () => {
+    const b = wrap.querySelector('[data-pp]');
+    if (b) b.textContent = v.paused ? '▶' : '❚❚';
+  };
+
+  v.playbackRate = mem.rate;
+  v.muted = mem.muted;                 // 上一集静音了，这一集也静音
+  v.addEventListener('play', syncPP);
+  v.addEventListener('pause', syncPP);
+  v.addEventListener('timeupdate', clock);
+  v.addEventListener('loadedmetadata', () => {
+    clock();
+    v.muted = mem.muted;
+    const mb = wrap.querySelector('[data-mute]');
+    if (mb) mb.classList.toggle('off', v.muted);
+    const t = mem.vpos[key()];
+    if (t > 2 && isFinite(v.duration) && t < v.duration - 1.5) {
+      v.currentTime = t;
+      vtoast('接着 ' + fmtDur(t) + ' 看');
+    }
+    syncPP();
+  });
+
+  // 进度随时记：播放、暂停、拖动都更新，回来能接着看（只在本页会话内有效）
+  let last = 0;
+  const saveT = () => {
+    if (v.currentTime > 0 && Math.abs(v.currentTime - last) > 0.4) {
+      last = v.currentTime;
+      mem.vpos[key()] = v.currentTime;
+    }
+  };
+  v.addEventListener('timeupdate', saveT);
+  v.addEventListener('pause', saveT);
+  v.addEventListener('seeked', saveT);
+
+  // 播完自动下一集
+  v.addEventListener('ended', () => {
+    mem.vpos[key()] = 0;
+    if (state.ci < state.toc.length - 1) {
+      vtoast('下一集');
+      setTimeout(() => { if (state.book && state.book.type === 'video') loadChapter(state.ci + 1); }, 600);
+    }
+  });
+
+  wrap.addEventListener('click', e => {
+    const b = e.target.closest('.mb');
+    if (!b) return;
+    if (b.dataset.sk) vseek(+b.dataset.sk);
+    else if (b.hasAttribute('data-pp')) vtoggle();
+    else if (b.hasAttribute('data-rate')) vrate(1, true);
+    else if (b.hasAttribute('data-fs')) vfull();
+    else if (b.hasAttribute('data-mute')) vmute();
+  });
+
+  // 双击画面：左 1/3 退 10 秒，右 1/3 进 10 秒，中间暂停
+  const dbl = (cx) => {
+    const r = v.getBoundingClientRect();
+    const x = (cx - r.left) / Math.max(1, r.width);
+    if (x < 0.34) vseek(-10); else if (x > 0.66) vseek(10); else vtoggle();
+  };
+  if (window.matchMedia('(hover:hover)').matches) {
+    wrap.addEventListener('dblclick', e => {
+      if (e.target.closest('.mvbar')) return;
+      dbl(e.clientX);
+    });
+  }
+  // 手机：两次轻点（<280ms、位移 <40px）算双击
+  let tt = 0, tx = 0, ty = 0;
+  wrap.addEventListener('touchend', e => {
+    if (e.target.closest('.mvbar') || e.touches.length) return;
+    const t = e.changedTouches[0];
+    if (!t) return;
+    if (Date.now() - tt < 280 && Math.hypot(t.clientX - tx, t.clientY - ty) < 40) {
+      dbl(t.clientX);
+      tt = 0;
+      return;
+    }
+    tt = Date.now(); tx = t.clientX; ty = t.clientY;
+  }, { passive: true });
+}
+
 /* ---------- 点击左右边缘翻页：左边上一页，右边下一页 ---------- */
 async function turnPage(dir) {
   if ($('#reader').hidden) return;
+  // 视频有自己的控件层，点画面边缘不该被当成翻页
+  if (state.book && state.book.type === 'video') return;
   const paper = document.querySelector('.paper');
   if (!paper || state.loading) return;
   stopScroll();
@@ -805,6 +1190,7 @@ const imp = {
   stageTarget: '', // 这次覆盖的是哪本书
   stageExpect: 0,  // 本次总共要传多少页
   sent: 0,         // 已成功上传的页数（从 images 头部算起），续传时从这里切片
+  video: null,     // 待上传的视频文件（与图片互斥，一次一个）
 };
 
 /* 手机浏览器（iOS Safari / Android Chrome）不实现 webkitdirectory，
@@ -849,6 +1235,7 @@ function closeImp() {
   imp.resumeId = '';
   imp.chain = 0;
   imp.sent = 0;
+  imp.video = null;
   clearImages();
   $('#impFile').value = '';
   $('#impDir').value = '';
@@ -904,10 +1291,13 @@ function stageHint() {
 function syncImp() {
   const hasT = !!imp.text;
   const n = imp.images.length;
-  $('#impStage').hidden = n === 0;
+  const hasV = !!imp.video;
+  $('#impStage').hidden = n === 0 || hasV;
   const ta = $('#impText');
-  ta.hidden = n > 0;          // 有图时收起正文框，避免两块输入区互相干扰
-  if (imp.stageId || imp.resumeId) {
+  ta.hidden = n > 0 || hasV;   // 有图或视频时收起正文框，避免两块输入区互相干扰
+  if (hasV) {
+    $('#impGo').textContent = imp.busy ? '上传中…' : '上传并播放';
+  } else if (imp.stageId || imp.resumeId) {
     $('#impGo').textContent = (imp.stageId && imp.stageExpect && imp.sent >= imp.stageExpect)
       ? '再次提交' : '继续上传';
   } else {
@@ -1147,6 +1537,86 @@ function takeImages(files, from) {
   impMsg(cut ? '单本上限 400 页，超出部分已忽略' : stageHint(), cut ? 'err' : 'ok');
 }
 
+/* ---------- 视频：分片上传（8MB 一片），断了重选同一个文件能接着传 ---------- */
+async function takeVideo(file) {
+  if (!file) return;
+  if (!VIDEO_EXT.test(file.name) && !/^video\//.test(file.type || '')) {
+    return impMsg('不是视频文件（支持 mp4 / webm / mov / mkv / avi 等）', 'err');
+  }
+  // 视频单独成书，和文本、图片不混装：选了视频就把别的清掉
+  if (imp.images.length || imp.text || $('#impText').value.trim()) {
+    clearImages();
+    imp.text = ''; imp.mode = '';
+    const ta = $('#impText');
+    ta.value = ''; ta.readOnly = false; ta.classList.remove('ro');
+  }
+  imp.video = file;
+  $('#impStage').hidden = true;
+  $('#impFname').hidden = false;
+  $('#impFname').textContent = `${file.name} · ${fmtBytes(file.size)}`;
+  if (!$('#impTitle').value.trim()) {
+    $('#impTitle').value = file.name.replace(/\.[^.]+$/, '').slice(0, 120);
+  }
+  syncImp();
+  impMsg(`已选视频「${file.name}」${fmtBytes(file.size)}，点「上传并播放」开始；中途断了重选同一个文件会接着传`, 'ok');
+}
+
+async function doImportVideo() {
+  const f = imp.video;
+  if (!f) return;
+  imp.busy = true;
+  const btn = $('#impGo');
+  btn.disabled = true;
+  let sent = 0;
+  try {
+    const cap = await api('/api/import/video/cap').catch(() => null);
+    if (cap && f.size > cap.max) {
+      throw new Error(`单个视频最大 ${fmtBytes(cap.max)}，这个文件有 ${fmtBytes(f.size)}`);
+    }
+    const fp = `${f.name}|${f.size}|${f.lastModified || 0}`;
+    const b = await postJSON('/api/import/video/begin',
+      { name: f.name, size: f.size, fingerprint: fp });
+    const { upload, chunk, total } = b;
+    const got = new Set(b.received || []);
+    sent = got.size * chunk;
+    for (let i = 0; i < total; i++) {
+      if (got.has(i)) continue;
+      const blob = f.slice(i * chunk, Math.min((i + 1) * chunk, f.size));
+      const r = await fetch(
+        `/api/import/video/chunk?upload=${encodeURIComponent(upload)}&index=${i}`,
+        { method: 'PUT', body: blob, headers: { 'Content-Type': 'application/octet-stream' } });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error((j.detail && (j.detail.msg || j.detail)) || ('第 ' + (i + 1) + ' 片上传失败 ' + r.status));
+      }
+      sent += blob.size;
+      const pct = Math.min(99, Math.round(sent / f.size * 99));
+      impMsg(`上传中 ${pct}%（${fmtBytes(sent)} / ${fmtBytes(f.size)}）` +
+        (total > 1 ? ` · 第 ${i + 1}/${total} 片` : ''));
+    }
+    impMsg('分片已收齐，正在合并并生成封面…');
+    const j = await postJSON('/api/import/video/finish', {
+      upload,
+      title: $('#impTitle').value.trim(),
+      author: $('#impAuthor').value.trim(),
+      cat: $('#impCat').value,
+      hidden: !!$('#impHidden').checked,
+    });
+    imp.video = null;
+    imp.busy = false;
+    closeImp();
+    await loadShelf(state.hidden);
+    await openBook(j.id, false);
+  } catch (e) {
+    // 不清 imp.video：留着还能点一次「重试」，服务端会跳过已收的分片
+    impMsg(String(e.message || e) + '（已上传的分片保留，可直接重试）', 'err');
+  } finally {
+    imp.busy = false;
+    btn.disabled = false;
+    syncImp();
+  }
+}
+
 /* ---------- ZIP：在浏览器里就地解压，之后与「选文件夹」走同一条流程 ---------- */
 const ZIP_MAX = 200 * 1024 * 1024;      // 压缩包上限（手机内存吃不消更大的）
 const mimeOf = n => /\.png$/i.test(n) ? 'image/png'
@@ -1258,6 +1728,18 @@ async function takeFiles(files, opts) {
     if (rest > 0) {
       const el = $('#impMsg');
       el.textContent = (el.textContent ? el.textContent + ' · ' : '') + `另有 ${rest} 个文件未处理，压缩包请单独上传`;
+    }
+    return;
+  }
+
+  // 视频单独成书：一次只收一个，多了提示逐个传
+  const vids = all.filter(f => VIDEO_EXT.test(f.name) || /^video\//.test(f.type || ''));
+  if (vids.length) {
+    await takeVideo(vids[0]);
+    if (vids.length > 1) {
+      const el = $('#impMsg');
+      el.textContent = (el.textContent ? el.textContent + ' · ' : '') +
+        `一次导入一个视频，其余 ${vids.length - 1} 个请传完再选`;
     }
     return;
   }
@@ -1667,14 +2149,24 @@ if (window.matchMedia('(hover:none)').matches) {
   $('#imgHint').textContent = '点缩略图右上角 ✕ 可移除某一页';
 }
 
+/* 删除口令：本次会话输过一次就预填到输入框，回车即可 */
+function askToken(what) {
+  const t = prompt(`删除${what}需要管理口令（服务端 ADMIN_TOKEN）：`, mem.token || '');
+  if (t == null) return null;
+  const v = t.trim();
+  if (!v) return null;
+  mem.token = v;
+  return v;
+}
+
 async function delBook() {
   const b = state.book;
   if (!b) return;
   const ok = confirm('把《' + b.title + '》彻底删除？\n\n' +
     '正文、图片页、译文缓存和目录译名都会立即清除，无法恢复。');
   if (!ok) return;
-  const token = prompt('删除《' + b.title + '》需要管理口令（服务端 ADMIN_TOKEN）：');
-  if (token == null) return;
+  const token = askToken('《' + b.title + '》');
+  if (!token) return;
   const r = await fetch('/api/book/' + b.id, {
     method: 'DELETE',
     headers: { 'X-Admin-Token': token },
@@ -1688,6 +2180,89 @@ async function delBook() {
   closeReader();
   await loadShelf(state.hidden);
 }
+
+/* ---------- 多选批量删除 ---------- */
+function selInfo() {
+  const n = state.sel ? state.sel.size : 0;
+  $('#selInfo').textContent = n ? `已选 ${n} 本` : '点书封选择，可多选';
+  $('#selDel').disabled = !n;
+  $('#selDel').textContent = '删除' + (n ? `（${n}）` : '');
+}
+
+function togglePick(id) {
+  if (!state.sel) return;
+  if (state.sel.has(id)) state.sel.delete(id); else state.sel.add(id);
+  const c = document.querySelector('.card[data-id="' + id + '"]');
+  if (c) {
+    const on = state.sel.has(id);
+    c.classList.toggle('picked', on);
+    const p = c.querySelector('.pick');
+    if (p) p.textContent = on ? '✓' : '';
+  }
+  selInfo();
+}
+
+function selMode(on) {
+  state.sel = on ? new Set() : null;
+  $('#selbar').hidden = !on;
+  $('#selBtn').textContent = on ? '退出选择' : '选择';
+  $('#selBtn').classList.toggle('on', !!on);
+  document.body.classList.toggle('selmode', !!on);
+  if (on) window.scrollTo({ top: 0, behavior: 'smooth' });
+  render();
+  selInfo();
+}
+
+async function delPicked() {
+  const ids = [...(state.sel || [])];
+  if (!ids.length) return;
+  const body = ids.length === 1 ? '这 1 本书' : `这 ${ids.length} 本书`;
+  if (!confirm(`彻底删除${body}？\n\n正文、图片页、视频、译文缓存和目录译名都会立即清除。\n没有回收站，删完不可恢复。`)) return;
+  const token = askToken(` ${ids.length} 本`);
+  if (!token) return;
+
+  const btn = $('#selDel');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '删除中…';
+  try {
+    const r = await fetch('/api/books/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+      body: JSON.stringify({ ids }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const d = j.detail;
+      throw new Error(typeof d === 'string' ? d : ('删除失败 ' + r.status));
+    }
+    const miss = (j.missing || []).length;
+    selMode(false);
+    await loadShelf(state.hidden);
+    alert(`已删除 ${j.deleted} 本` + (miss ? `；${miss} 本已不存在，跳过` : '') + '。');
+  } catch (err) {
+    alert(String((err && err.message) || err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+$('#selBtn').addEventListener('click', () => selMode(!state.sel));
+$('#selCancel').addEventListener('click', () => selMode(false));
+$('#selAll').addEventListener('click', () => {
+  if (!state.sel) return;
+  state.view.forEach(b => state.sel.add(b.id));
+  render(); selInfo();
+});
+$('#selInv').addEventListener('click', () => {
+  if (!state.sel) return;
+  state.view.forEach(b => {
+    if (state.sel.has(b.id)) state.sel.delete(b.id); else state.sel.add(b.id);
+  });
+  render(); selInfo();
+});
+$('#selDel').addEventListener('click', delPicked);
 
 $('#impBtn').addEventListener('click', openImp);
 $('#impModal').addEventListener('click', e => {
@@ -1763,6 +2338,7 @@ document.addEventListener('paste', e => {
 /* 提交：按暂存内容决定建几本。文本先入库（快），图片走后台上传。 */
 async function submit() {
   if (imp.busy) return;
+  if (imp.video) return doImportVideo();
   const typed = ($('#impText').value || '').trim();
   const text = (imp.mode === 'file' && imp.text) ? imp.text : typed;
   const n = imp.images.length;

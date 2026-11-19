@@ -241,6 +241,34 @@ def delete(bid: str) -> bool:
         return True
 
 
+def delete_many(ids) -> list:
+    """批量彻底删除：正文文件逐个删，索引只重写一次。
+
+    逐本 delete 会在每本删完后整份重写 library.json，删几百本就是几百次
+    全量写盘；批量版把索引合并成一次写入，耗时随书数线性增长但常数极小。
+    返回真正删掉的 id 列表（书不存在的不算）。
+    """
+    want = {str(x) for x in (ids or []) if str(x)}
+    if not want:
+        return []
+    gone: list = []
+    with _lock:
+        keep = []
+        for b in _read_lib():
+            bid = b.get("id")
+            if bid in want:
+                try:
+                    os.remove(os.path.join(BOOKS, bid + ".json.gz"))
+                except FileNotFoundError:
+                    pass
+                gone.append(bid)
+            else:
+                keep.append(b)
+        if gone:
+            _write_lib(keep)
+    return gone
+
+
 # ---------------------------------------------------------------- 同名更新
 def _key(s: str) -> str:
     """书名/作者归一：去空白与常见标点，全角半角统一，忽略大小写。"""

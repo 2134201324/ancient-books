@@ -9,13 +9,14 @@ import threading
 import time
 from functools import lru_cache
 
-from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import comic
 import importer
 import trans
+import video
 from trans import translate_chapter
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -53,8 +54,12 @@ def _index(lib: list) -> list:
             "source": b.get("source", ""),
             "hidden": bool(b.get("hidden")),
             "type": b.get("type", "text"),
+            "size": b.get("size", 0),
+            "dur": b.get("dur", 0),
+            # 排序权重：图片按页、视频按体积（MB）、文本按字数
             "w": (b["n"] * 2500) if b.get("type") == "image" else
-                 (b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55)),
+                 (int((b.get("size") or 0) // 1024) if b.get("type") == "video" else
+                  (b["chars"] if b.get("lang", "zh") == "zh" else int(b.get("words", 0) * 1.55))),
         }
         for b in lib
     ]
@@ -233,7 +238,8 @@ def book_meta(bid: str):
     b = _load_book(bid)
     chs = b["chapters"]
     is_img = b.get("type") == "image"
-    has_cn = False if is_img else _has_cn(b)
+    is_vid = b.get("type") == "video"
+    has_cn = False if (is_img or is_vid) else _has_cn(b)
     lang = b.get("lang", "zh")
     can_modern = _can_modern(b)
     cts = trans.titles(b["id"])
@@ -262,7 +268,10 @@ def book_meta(bid: str):
         # mode: en2zh = 英译中；zh2modern = 文言今译；空 = 无可切换译文
         "mode": "en2zh" if lang == "en" else ("zh2modern" if can_modern else ""),
         "can_modern": can_modern,
-        "translate": bool(not is_img and trans.enabled() and (lang == "en" or can_modern)),
+        "translate": bool(not is_img and not is_vid and trans.enabled()
+                          and (lang == "en" or can_modern)),
+        "size": b.get("size", 0),
+        "has_poster": bool(b.get("has_poster")),
         "toc": toc,
     }
 
@@ -287,6 +296,9 @@ def chapter(bid: str, idx: int):
         "img": c.get("img") or "",
         "w": c.get("w", 0),
         "h": c.get("h", 0),
+        "file": c.get("file") or "",
+        "dur": c.get("dur", 0),
+        "size": c.get("size", 0),
     }
 
 
@@ -318,8 +330,8 @@ def translate(bid: str, idx: int):
     b = _load_book(bid)
     if idx < 0 or idx >= len(b["chapters"]):
         raise HTTPException(404, "章节不存在")
-    if b.get("type") == "image":
-        raise HTTPException(400, "图片书没有可翻译的正文")
+    if b.get("type") in ("image", "video"):
+        raise HTTPException(400, "这本没有可翻译的正文")
     if b.get("lang", "zh") != "en" and not _can_modern(b):
         raise HTTPException(400, "该书为白话文本，无需今译")
     if not trans.enabled():
@@ -362,6 +374,31 @@ def _drop_cn_titles(bid: str) -> None:
             _titles_state["mtime"] = -1.0
     except Exception as e:  # noqa: BLE001
         print(f"[titles] 清理 {bid} 失败: {e}", flush=True)
+
+
+def _drop_cn_titles_many(ids) -> None:
+    """批量摘除目录译名：整份清单只读一次、写一次。
+
+    逐本调用 _drop_cn_titles 会把整个 titles 文件重写 N 遍，
+    批量删几百本时纯属浪费，这里合并成一次。
+    """
+    if not os.path.exists(TITLES_PATH):
+        return
+    try:
+        with open(TITLES_PATH, encoding="utf-8") as f:
+            data = json.load(f) or {}
+        hit = [b for b in ids if b in data]
+        if not hit:
+            return
+        for b in hit:
+            data.pop(b, None)
+        tmp = TITLES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, TITLES_PATH)
+        _titles_state["mtime"] = -1.0
+    except Exception as e:  # noqa: BLE001
+        print(f"[titles] 批量清理失败: {e}", flush=True)
 
 
 # ---------------------------------------------------------------- 导入书籍
@@ -681,6 +718,80 @@ def stage_cancel(sid: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- 导入视频
+# 分片上传：begin 拿会话 → 逐片 PUT → finish 合并入库。单片 8MB，
+# 断线重选同一个文件时按指纹接上，已传的片不重传。
+@app.post("/api/import/video/begin")
+def video_begin(payload: dict = Body(...)):
+    name = str(payload.get("name") or "").strip()
+    try:
+        size = int(payload.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    fp = str(payload.get("fingerprint") or "").strip()[:64]
+    if not video.is_video(name):
+        raise HTTPException(400, "不是视频文件（支持 mp4 / webm / mov / mkv / avi 等）")
+    try:
+        return {"ok": True, **video.begin(fp, name, size)}
+    except video.VideoError as e:
+        raise HTTPException(e.status, e.msg)
+
+
+@app.put("/api/import/video/chunk")
+async def video_chunk(data: bytes = Body(...), upload: str = Query(...), index: int = Query(...)):
+    """一片一个请求；body 直接是二进制，不套 multipart。"""
+    try:
+        return {"ok": True, **video.put_chunk(upload, int(index), data)}
+    except video.VideoError as e:
+        raise HTTPException(e.status, e.msg)
+
+
+@app.get("/api/import/video/status")
+def video_status(upload: str = ""):
+    st = video.status(upload)
+    if not st:
+        raise HTTPException(404, "上传会话不存在或已过期")
+    return st
+
+
+@app.post("/api/import/video/finish")
+def video_finish(payload: dict = Body(...)):
+    upload = str(payload.get("upload") or "").strip()
+    append = str(payload.get("append") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    author = str(payload.get("author") or "").strip()
+    cat = str(payload.get("cat") or "其他").strip()
+    hidden = bool(payload.get("hidden"))
+    if not append:
+        imported = sum(1 for x in INDEX if x.get("source") == "user")
+        if imported >= MAX_IMPORTED:
+            raise HTTPException(507, "导入数量已达上限，请先删除部分导入书籍")
+        conflict = importer.find_conflict(title or "", author, hidden) if title else None
+        if conflict and not payload.get("allow_duplicate"):
+            if conflict.get("type") == "video":
+                append = conflict["id"]      # 同名视频：默认续一集，不新建一本
+            else:
+                raise HTTPException(409, detail={
+                    "msg": f"已存在同名书籍《{conflict['title']}》，换个名字再导入",
+                    "conflict": {"id": conflict["id"], "title": conflict["title"],
+                                 "n": conflict.get("n", 0), "type": conflict.get("type")},
+                })
+    try:
+        res = video.finish(upload, title, author, cat, hidden, append)
+    except video.VideoError as e:
+        raise HTTPException(e.status, e.msg)
+    reload_library()
+    return res
+
+
+@app.get("/api/import/video/cap")
+def video_cap():
+    """告诉前端这台机器能做什么：有无 ffmpeg、单片大小、上限。"""
+    return {"chunk": video.CHUNK, "max": video.MAX_BYTES,
+            "ffmpeg": bool(video.FFMPEG), "playable": list(video.PLAYABLE_EXT),
+            "free": video.disk_free()}
+
+
 def _admin(token: str) -> None:
     """删除操作校验：必须配置 ADMIN_TOKEN，且口令一致。"""
     real = os.environ.get("ADMIN_TOKEN", "")
@@ -707,6 +818,46 @@ def delete_book(bid: str, x_admin_token: str = Header("")):
     _drop_cn_titles(bid)
     reload_library()
     return {"ok": True, "id": bid, "deleted": True}
+
+
+@app.post("/api/books/delete")
+def delete_books(payload: dict = Body(...), x_admin_token: str = Header("")):
+    """批量彻底删除：一次请求删一批，不可恢复。
+
+    与单本删除同一条清理链（正文 / 图片页 / 视频 / 译文缓存 / 目录译名），
+    区别是索引与译名清单各只重写一次，删几百本不会变慢成 N 倍。
+    """
+    _admin(x_admin_token)
+    raw = payload.get("ids")
+    if not isinstance(raw, list):
+        raise HTTPException(400, "ids 必须是数组")
+    ids, seen = [], set()
+    for x in raw:
+        bid = str(x or "").strip()
+        if bid and bid not in seen:
+            seen.add(bid)
+            ids.append(bid)
+    if not ids:
+        raise HTTPException(400, "没有要删除的书")
+    if len(ids) > 2000:
+        raise HTTPException(400, "一次最多删 2000 本，请分批")
+
+    with _persist_lock:
+        gone = importer.delete_many(ids)
+
+    for bid in gone:
+        comic.drop_media(bid)
+        shutil.rmtree(os.path.join(DATA, "cn_cache", bid), ignore_errors=True)
+    if gone:
+        _drop_cn_titles_many(gone)
+        reload_library()
+    gs = set(gone)
+    return {
+        "ok": True,
+        "deleted": len(gone),
+        "ids": gone,
+        "missing": [x for x in ids if x not in gs],
+    }
 
 
 @app.get("/api/stats")

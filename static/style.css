@@ -510,3 +510,131 @@ button{font-family:inherit;cursor:pointer}
   box-shadow:0 10px 34px rgba(40,30,20,.14);
 }
 .text.imgs .loading{color:var(--muted);font-size:13px;padding:60px 0}
+
+/* ---------- 视频书 ---------- */
+.paper.vidmode{padding-top:clamp(8px,1.6vw,18px);padding-bottom:40px}
+.paper.vidmode~.flips{display:none}          /* 播放器自带控件，边缘翻转会挡住进度条 */
+.text.vids{
+  max-width:min(1180px,100%);padding:0 clamp(6px,1.6vw,16px);text-indent:0;
+}
+.text.vids video.mv{
+  display:block;width:100%;height:auto;
+  max-height:calc(100vh - 268px);
+  max-height:calc(100dvh - 268px);
+  background:#000;border-radius:3px;
+  box-shadow:0 12px 36px rgba(30,22,14,.20);
+  outline:none;
+}
+.text.vids video.mv:focus-visible{box-shadow:0 0 0 2px var(--line),0 12px 36px rgba(30,22,14,.20)}
+.text.vids .mvmeta{
+  margin:2px 2px 0;font-size:12px;letter-spacing:.02em;color:var(--muted);
+  text-indent:0;font-variant-numeric:tabular-nums;
+}
+
+/* 播放器外壳：视频 + 浮层提示 + 自定义控制条 */
+.mvwrap{display:flex;flex-direction:column;gap:8px}
+.mvbox{position:relative;line-height:0}
+.mvtoast{
+  position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);
+  padding:8px 16px;border-radius:4px;
+  background:rgba(18,14,10,.72);color:#fff;
+  font-size:13.5px;letter-spacing:.04em;line-height:1.4;white-space:nowrap;
+  pointer-events:none;opacity:0;transition:opacity .16s,transform .16s;
+  backdrop-filter:blur(3px);z-index:3;
+}
+.mvtoast.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+
+.mvbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.mvgrp{display:flex;gap:6px}
+.mb{
+  min-width:48px;height:34px;padding:0 10px;
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);background:var(--paper2);color:var(--ink2);
+  border-radius:3px;font-size:12.5px;letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;transition:.15s;
+}
+.mb:hover{border-color:var(--accent);color:var(--accent)}
+.mb:active{transform:translateY(1px)}
+.mb.pp{min-width:56px;background:var(--ink);color:var(--paper);border-color:var(--ink);font-size:13px}
+.mb.pp:hover{background:var(--ink2);border-color:var(--ink2);color:var(--paper)}
+
+/* 喇叭图标：开着显示两道声波，静音时划一道斜杠 */
+.mb.ic{min-width:44px;padding:0 8px}
+.mb.ic svg{
+  width:18px;height:18px;display:block;
+  fill:none;stroke:currentColor;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.mb.ic svg path:first-child{fill:currentColor;stroke:none}
+.mb.ic .sl{display:none;stroke:var(--accent);stroke-width:1.9}
+.mb.ic.off .wv{display:none}
+.mb.ic.off .sl{display:block}
+.mb.ic.off{color:var(--muted)}
+
+/* 全屏：控制条浮在画面底下，元信息收起 */
+.mvwrap:fullscreen{background:#000;gap:0;justify-content:center}
+.mvwrap:fullscreen .mvbox{display:flex;align-items:center;justify-content:center;height:100%}
+.mvwrap:fullscreen video.mv{max-height:100dvh;border-radius:0;box-shadow:none}
+.mvwrap:fullscreen .mvbar{
+  position:fixed;left:0;right:0;bottom:0;
+  padding:14px clamp(12px,3vw,28px) calc(14px + env(safe-area-inset-bottom));
+  background:linear-gradient(transparent,rgba(0,0,0,.66));
+  opacity:.35;transition:opacity .2s;
+}
+.mvwrap:fullscreen .mvbar:hover,.mvwrap:fullscreen .mvbar:focus-within{opacity:1}
+.mvwrap:fullscreen .mvmeta{display:none}
+
+.card .comic.vid{
+  color:var(--paper);background:var(--ink2);border-color:var(--ink2);
+}
+
+/* ---------- 多选批量删除 ---------- */
+.selBtn{
+  border:1px solid var(--line);background:transparent;color:var(--ink2);
+  padding:6px 13px;border-radius:2px;font-size:13px;transition:.18s;
+}
+.selBtn:hover{border-color:var(--accent);color:var(--accent)}
+.selBtn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+.card .pick{
+  position:absolute;left:9px;top:9px;width:18px;height:18px;border-radius:50%;
+  border:1.5px solid var(--line);background:var(--paper);
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;line-height:1;color:#fff;font-weight:700;
+}
+body.selmode .card{padding-left:36px}
+body.selmode .card:hover{transform:none}
+.card.picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.card.picked .pick{background:var(--accent);border-color:var(--accent)}
+
+.selbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:90;
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px clamp(14px,4vw,40px) calc(10px + env(safe-area-inset-bottom));
+  background:var(--paper2);border-top:1px solid var(--line);
+  box-shadow:0 -8px 24px rgba(40,30,20,.10);
+}
+body.selmode{padding-bottom:76px}
+.sinfo{font-size:13px;color:var(--ink2);letter-spacing:.02em;white-space:nowrap}
+.sacts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.sacts button{
+  border:1px solid var(--line);background:transparent;color:var(--ink2);
+  padding:7px 14px;border-radius:2px;font-size:13px;transition:.15s;
+}
+.sacts button:hover{border-color:var(--accent);color:var(--accent)}
+.sacts button.danger{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sacts button.danger:hover{filter:brightness(1.06)}
+.sacts button.danger:disabled{opacity:.4;cursor:not-allowed}
+
+@media (max-width:560px){
+  .mvbar{gap:6px}
+  .mvgrp{gap:4px}
+  .mb{min-width:38px;height:32px;padding:0 5px;font-size:11.5px}
+  .mb.pp{min-width:46px}
+  .mb.ic{min-width:38px;padding:0 4px}
+  .mb.ic svg{width:17px;height:17px}
+  .selbar{gap:8px}
+  .sinfo{font-size:12px}
+  .sacts{gap:6px}
+  .sacts button{padding:6px 11px;font-size:12.5px}
+}
